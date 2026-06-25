@@ -1,0 +1,1 @@
+GridoPlanner Labs inicializado.\n
