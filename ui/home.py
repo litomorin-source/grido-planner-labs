@@ -7,6 +7,7 @@ import streamlit as st
 from core.config import get_github_config
 from core.github_sync import GitHubSync
 from core.validators import validar_maestro, validar_carrito
+from core.excel_reader import summarize_workbook, summarize_carrito
 from core.version import APP_VERSION
 
 MAESTRO_GITHUB_PATH = "data/Maestro_Productos_Grido.xlsx"
@@ -103,6 +104,70 @@ def render_centro_datos(github):
     with col_b:
         render_file_status("Carrito", st.session_state["data_status"]["carrito"])
 
+def render_lectura_archivos(github):
+    st.header("Lectura desde GitHub")
+    st.caption("Descarga Maestro y Carrito desde GitHub y los lee dentro de la app.")
+
+    if st.button("Leer archivos desde GitHub", type="primary", use_container_width=True):
+        with st.spinner("Descargando Maestro..."):
+            maestro = github.download_file_bytes(MAESTRO_GITHUB_PATH)
+
+        with st.spinner("Descargando Carrito..."):
+            carrito = github.download_file_bytes(CARRITO_GITHUB_PATH)
+
+        st.session_state["read_test"] = {
+            "maestro": maestro,
+            "carrito": carrito,
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        }
+
+    if "read_test" not in st.session_state:
+        st.info("Tocá el botón para leer los archivos reales desde GitHub.")
+        return
+
+    st.caption(f"Lectura UTC: {st.session_state['read_test']['timestamp']}")
+
+    maestro = st.session_state["read_test"]["maestro"]
+    carrito = st.session_state["read_test"]["carrito"]
+
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        st.subheader("Maestro")
+        if not maestro["ok"]:
+            st.error(maestro.get("message"))
+            st.code(maestro.get("details", ""))
+        else:
+            try:
+                summary = summarize_workbook(maestro["content_bytes"])
+                st.success("Maestro leído correctamente.")
+                st.metric("Hojas", summary["sheet_count"])
+                for sheet in summary["sheets"]:
+                    with st.expander(sheet["name"], expanded=False):
+                        st.write(f"Filas detectadas: {sheet['max_row']}")
+                        st.write(f"Columnas detectadas: {sheet['max_column']}")
+                        st.write(f"Filas con datos: {sheet['rows_with_data']}")
+            except Exception as e:
+                st.error(f"No pude leer el Maestro. Error: {e}")
+
+    with col_b:
+        st.subheader("Carrito")
+        if not carrito["ok"]:
+            st.error(carrito.get("message"))
+            st.code(carrito.get("details", ""))
+        else:
+            try:
+                summary = summarize_carrito(carrito["content_bytes"])
+                st.success("Carrito leído correctamente.")
+                st.write("Hoja:")
+                st.code(summary["sheet"])
+                st.metric("Filas con datos", summary["rows_with_data"])
+                st.metric("Códigos válidos columna B", summary["valid_codes_col_b"])
+                st.metric("Precios válidos columna I", summary["valid_prices_col_i"])
+                st.caption(f"Dimensión detectada: {summary['max_row']} filas x {summary['max_column']} columnas")
+            except Exception as e:
+                st.error(f"No pude leer el Carrito. Error: {e}")
+
 def subir_archivo_validado(label, uploader_label, destino, validator, filename, github):
     st.subheader(label)
     st.caption(f"Destino en GitHub: `{destino}`")
@@ -142,7 +207,7 @@ def subir_archivo_validado(label, uploader_label, destino, validator, filename, 
 
         if st.button(f"Guardar {label} en GitHub", type="primary", use_container_width=True, key=f"btn_{destino}"):
             timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-            commit_message = f"Labs 0.5.0 - actualizar {label} ({timestamp})"
+            commit_message = f"Labs 0.6.0 - actualizar {label} ({timestamp})"
 
             with st.spinner(f"Subiendo {label} a GitHub..."):
                 result = github.upload_bytes_file(
@@ -157,6 +222,7 @@ def subir_archivo_validado(label, uploader_label, destino, validator, filename, 
                 st.code(result.get("commit"))
 
                 st.session_state.pop("data_status", None)
+                st.session_state.pop("read_test", None)
 
                 if result.get("html_url"):
                     st.link_button("Ver commit en GitHub", result["html_url"], use_container_width=True)
@@ -199,12 +265,15 @@ def render_home():
                     st.write("Último commit:")
                     st.code(branch.get("commit_sha"))
 
-    tab1, tab2 = st.tabs(["Centro de Datos", "Actualizar archivos"])
+    tab1, tab2, tab3 = st.tabs(["Centro de Datos", "Leer archivos", "Actualizar archivos"])
 
     with tab1:
         render_centro_datos(github)
 
     with tab2:
+        render_lectura_archivos(github)
+
+    with tab3:
         subir_archivo_validado(
             label="Maestro",
             uploader_label="Subir Maestro_Productos_Grido.xlsx",

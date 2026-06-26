@@ -42,24 +42,12 @@ class GitHubSync:
         r = requests.get(url, headers=self.headers, params={"ref": self.branch}, timeout=20)
 
         if r.status_code == 404:
-            return {
-                "ok": True,
-                "exists": False,
-                "path": path,
-                "message": "Archivo no encontrado",
-            }
+            return {"ok": True, "exists": False, "path": path, "message": "Archivo no encontrado"}
 
         if r.status_code != 200:
-            return {
-                "ok": False,
-                "exists": None,
-                "path": path,
-                "message": f"No pude consultar archivo. Status {r.status_code}",
-                "details": r.text[:800],
-            }
+            return {"ok": False, "exists": None, "path": path, "message": f"No pude consultar archivo. Status {r.status_code}", "details": r.text[:800]}
 
         data = r.json()
-        sha = data.get("sha")
         commit_info = self.get_last_commit_for_path(path)
 
         return {
@@ -68,7 +56,7 @@ class GitHubSync:
             "path": path,
             "name": data.get("name"),
             "size": data.get("size"),
-            "sha": sha,
+            "sha": data.get("sha"),
             "html_url": data.get("html_url"),
             "download_url": data.get("download_url"),
             "commit": commit_info,
@@ -84,11 +72,7 @@ class GitHubSync:
         )
 
         if r.status_code != 200:
-            return {
-                "ok": False,
-                "message": f"No pude consultar commits. Status {r.status_code}",
-                "details": r.text[:500],
-            }
+            return {"ok": False, "message": f"No pude consultar commits. Status {r.status_code}", "details": r.text[:500]}
 
         commits = r.json()
         if not commits:
@@ -108,6 +92,38 @@ class GitHubSync:
             "author_date": author.get("date"),
         }
 
+    def download_file_bytes(self, path: str):
+        info = self.get_file_info(path)
+        if not info.get("ok"):
+            return info
+        if not info.get("exists"):
+            return {"ok": False, "message": f"Archivo no encontrado: {path}"}
+
+        url = f"{self.api_base}/repos/{self.repo}/contents/{path}"
+        r = requests.get(url, headers=self.headers, params={"ref": self.branch}, timeout=30)
+
+        if r.status_code != 200:
+            return {"ok": False, "message": f"No pude descargar archivo. Status {r.status_code}", "details": r.text[:800]}
+
+        data = r.json()
+        encoded = data.get("content")
+        if not encoded:
+            return {"ok": False, "message": "GitHub no devolvió contenido para descargar."}
+
+        try:
+            content_bytes = base64.b64decode(encoded)
+        except Exception as e:
+            return {"ok": False, "message": f"No pude decodificar el archivo. Error: {e}"}
+
+        return {
+            "ok": True,
+            "path": path,
+            "name": data.get("name"),
+            "size": data.get("size"),
+            "sha": data.get("sha"),
+            "content_bytes": content_bytes,
+        }
+
     def _get_existing_sha(self, path: str):
         url = f"{self.api_base}/repos/{self.repo}/contents/{path}"
         r = requests.get(url, headers=self.headers, params={"ref": self.branch}, timeout=20)
@@ -117,11 +133,7 @@ class GitHubSync:
         if r.status_code == 404:
             return {"ok": True, "sha": None}
 
-        return {
-            "ok": False,
-            "message": f"No pude consultar archivo existente. Status {r.status_code}",
-            "details": r.text[:800],
-        }
+        return {"ok": False, "message": f"No pude consultar archivo existente. Status {r.status_code}", "details": r.text[:800]}
 
     def upload_bytes_file(self, path: str, content_bytes: bytes, commit_message: str):
         sha_result = self._get_existing_sha(path)
@@ -151,8 +163,4 @@ class GitHubSync:
                 "path": path,
             }
 
-        return {
-            "ok": False,
-            "message": f"No pude subir archivo. Status {r.status_code}",
-            "details": r.text[:1000],
-        }
+        return {"ok": False, "message": f"No pude subir archivo. Status {r.status_code}", "details": r.text[:1000]}

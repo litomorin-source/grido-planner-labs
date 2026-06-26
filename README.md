@@ -1,3 +1,3 @@
 # GridoPlanner Labs
 
-Versión 0.5.0: Centro de Datos + actualización Maestro/Carrito.
+Versión 0.6.0: descarga y lectura real de Maestro/Carrito desde GitHub.
