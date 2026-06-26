@@ -1,9 +1,15 @@
 from datetime import datetime
+import tempfile
+from pathlib import Path
+
 import streamlit as st
 
 from core.config import get_github_config
 from core.github_sync import GitHubSync
+from core.validators import validar_maestro
 from core.version import APP_VERSION
+
+MAESTRO_GITHUB_PATH = "data/Maestro_Productos_Grido.xlsx"
 
 def status_line(ok: bool, label: str, detail: str = ""):
     if ok:
@@ -15,7 +21,7 @@ def render_home():
     st.title("🍦 GridoPlanner Labs")
     st.caption(APP_VERSION)
 
-    st.info("Labs 0.2 verifica conexión con GitHub y prueba escritura creando/actualizando `data/test.txt`.")
+    st.info("Labs 0.3.0 permite validar y actualizar el Maestro en GitHub con commit automático.")
 
     config = get_github_config()
     status_line(config["ok"], "Secrets encontrados")
@@ -26,55 +32,81 @@ def render_home():
             st.code(item)
         st.stop()
 
-    st.write("Repositorio:")
-    st.code(config["repo"])
-    st.write("Rama:")
-    st.code(config["branch"])
-
     github = GitHubSync(config["token"], config["repo"], config["branch"])
 
+    with st.expander("Estado GitHub", expanded=False):
+        st.write("Repositorio:")
+        st.code(config["repo"])
+        st.write("Rama:")
+        st.code(config["branch"])
+
+        if st.button("Probar conexión GitHub", use_container_width=True):
+            with st.spinner("Conectando..."):
+                result = github.verify()
+
+            repo = result.get("repo")
+            branch = result.get("branch")
+
+            status_line(repo["ok"], "Repositorio accesible", repo.get("message", ""))
+            if branch:
+                status_line(branch["ok"], "Rama encontrada", branch.get("message", ""))
+                if branch.get("ok"):
+                    st.write("Último commit:")
+                    st.code(branch.get("commit_sha"))
+
     st.markdown("---")
-    st.subheader("1. Probar conexión")
+    st.subheader("Actualizar Maestro")
 
-    if st.button("Probar conexión GitHub", type="primary", use_container_width=True):
-        with st.spinner("Conectando..."):
-            result = github.verify()
+    st.caption(f"Destino en GitHub: `{MAESTRO_GITHUB_PATH}`")
 
-        repo = result.get("repo")
-        branch = result.get("branch")
+    maestro_file = st.file_uploader(
+        "Subir Maestro_Productos_Grido.xlsx",
+        type=["xlsx"],
+        help="Debe tener las hojas Productos, Aliases, Exclusiones y Configuración.",
+    )
 
-        status_line(repo["ok"], "Repositorio accesible", repo.get("message", ""))
-        if branch:
-            status_line(branch["ok"], "Rama encontrada", branch.get("message", ""))
-            if branch.get("ok"):
-                st.write("Último commit:")
-                st.code(branch.get("commit_sha"))
+    if maestro_file:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir) / "Maestro_Productos_Grido.xlsx"
+            file_bytes = maestro_file.getvalue()
+            tmp_path.write_bytes(file_bytes)
 
-        if result["ok"]:
-            st.success("GitHub Sync base funcionando.")
-            st.balloons()
+            ok, errores, advertencias = validar_maestro(tmp_path)
 
-    st.markdown("---")
-    st.subheader("2. Probar escritura")
+            if ok:
+                st.success("Maestro validado correctamente.")
 
-    if st.button("Subir archivo de prueba a GitHub", use_container_width=True):
-        contenido = (
-            "GridoPlanner Labs - prueba de escritura GitHub\\n"
-            f"Fecha/hora UTC: {datetime.utcnow().isoformat()}\\n"
-        )
+                if advertencias:
+                    with st.expander("Advertencias", expanded=False):
+                        for adv in advertencias:
+                            st.warning(adv)
 
-        with st.spinner("Subiendo data/test.txt..."):
-            upload_result = github.upload_text_file(
-                path="data/test.txt",
-                content=contenido,
-                commit_message="Labs 0.2 - actualizar archivo de prueba",
-            )
+                col1, col2 = st.columns(2)
+                col1.metric("Tamaño archivo", f"{len(file_bytes) / 1024:.1f} KB")
+                col2.metric("Destino", MAESTRO_GITHUB_PATH)
 
-        if upload_result["ok"]:
-            st.success("Archivo de prueba subido correctamente.")
-            st.write("Commit:")
-            st.code(upload_result.get("commit"))
-            st.balloons()
-        else:
-            st.error(upload_result["message"])
-            st.code(upload_result.get("details", ""))
+                if st.button("Guardar Maestro en GitHub", type="primary", use_container_width=True):
+                    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+                    commit_message = f"Labs 0.3.0 - actualizar Maestro ({timestamp})"
+
+                    with st.spinner("Subiendo Maestro a GitHub..."):
+                        result = github.upload_bytes_file(
+                            path=MAESTRO_GITHUB_PATH,
+                            content_bytes=file_bytes,
+                            commit_message=commit_message,
+                        )
+
+                    if result["ok"]:
+                        st.success("Maestro guardado en GitHub correctamente.")
+                        st.write("Commit:")
+                        st.code(result.get("commit"))
+                        if result.get("html_url"):
+                            st.link_button("Ver commit en GitHub", result["html_url"], use_container_width=True)
+                    else:
+                        st.error(result["message"])
+                        st.code(result.get("details", ""))
+
+            else:
+                st.error("El Maestro no pasó la validación.")
+                for err in errores:
+                    st.error(err)\n

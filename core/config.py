@@ -12,4 +12,4 @@ def get_github_config():
         "token": st.secrets["GITHUB_TOKEN"],
         "repo": st.secrets["GITHUB_REPO"],
         "branch": st.secrets["GITHUB_BRANCH"],
-    }
+    }\n

@@ -37,25 +37,53 @@ class GitHubSync:
         branch_check = self.check_branch()
         return {"ok": branch_check["ok"], "repo": repo_check, "branch": branch_check}
 
-    def upload_text_file(self, path: str, content: str, commit_message: str):
+    def _get_existing_sha(self, path: str):
         url = f"{self.api_base}/repos/{self.repo}/contents/{path}"
-        get_resp = requests.get(url, headers=self.headers, params={"ref": self.branch}, timeout=20)
+        response = requests.get(url, headers=self.headers, params={"ref": self.branch}, timeout=20)
 
-        sha = None
-        if get_resp.status_code == 200:
-            sha = get_resp.json().get("sha")
-        elif get_resp.status_code != 404:
-            return {"ok": False, "message": f"No pude consultar archivo existente. Status {get_resp.status_code}", "details": get_resp.text[:500]}
+        if response.status_code == 200:
+            return {"ok": True, "exists": True, "sha": response.json().get("sha")}
+        if response.status_code == 404:
+            return {"ok": True, "exists": False, "sha": None}
 
+        return {
+            "ok": False,
+            "exists": None,
+            "sha": None,
+            "message": f"No pude consultar archivo existente. Status {response.status_code}",
+            "details": response.text[:800],
+        }
+
+    def upload_bytes_file(self, path: str, content_bytes: bytes, commit_message: str):
+        sha_result = self._get_existing_sha(path)
+        if not sha_result["ok"]:
+            return sha_result
+
+        url = f"{self.api_base}/repos/{self.repo}/contents/{path}"
         payload = {
             "message": commit_message,
-            "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+            "content": base64.b64encode(content_bytes).decode("utf-8"),
             "branch": self.branch,
         }
-        if sha:
-            payload["sha"] = sha
 
-        put_resp = requests.put(url, headers=self.headers, json=payload, timeout=20)
-        if put_resp.status_code in (200, 201):
-            return {"ok": True, "message": "Archivo subido correctamente", "commit": put_resp.json().get("commit", {}).get("sha")}
-        return {"ok": False, "message": f"No pude subir archivo. Status {put_resp.status_code}", "details": put_resp.text[:500]}
+        if sha_result["sha"]:
+            payload["sha"] = sha_result["sha"]
+
+        response = requests.put(url, headers=self.headers, json=payload, timeout=30)
+
+        if response.status_code in (200, 201):
+            data = response.json()
+            commit = data.get("commit", {})
+            return {
+                "ok": True,
+                "message": "Archivo subido correctamente",
+                "commit": commit.get("sha"),
+                "html_url": commit.get("html_url"),
+                "path": path,
+            }
+
+        return {
+            "ok": False,
+            "message": f"No pude subir archivo. Status {response.status_code}",
+            "details": response.text[:1000],
+        }\n
