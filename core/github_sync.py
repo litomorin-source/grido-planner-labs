@@ -37,6 +37,77 @@ class GitHubSync:
         branch_check = self.check_branch()
         return {"ok": branch_check["ok"], "repo": repo_check, "branch": branch_check}
 
+    def get_file_info(self, path: str):
+        url = f"{self.api_base}/repos/{self.repo}/contents/{path}"
+        r = requests.get(url, headers=self.headers, params={"ref": self.branch}, timeout=20)
+
+        if r.status_code == 404:
+            return {
+                "ok": True,
+                "exists": False,
+                "path": path,
+                "message": "Archivo no encontrado",
+            }
+
+        if r.status_code != 200:
+            return {
+                "ok": False,
+                "exists": None,
+                "path": path,
+                "message": f"No pude consultar archivo. Status {r.status_code}",
+                "details": r.text[:800],
+            }
+
+        data = r.json()
+        sha = data.get("sha")
+        commit_info = self.get_last_commit_for_path(path)
+
+        return {
+            "ok": True,
+            "exists": True,
+            "path": path,
+            "name": data.get("name"),
+            "size": data.get("size"),
+            "sha": sha,
+            "html_url": data.get("html_url"),
+            "download_url": data.get("download_url"),
+            "commit": commit_info,
+        }
+
+    def get_last_commit_for_path(self, path: str):
+        url = f"{self.api_base}/repos/{self.repo}/commits"
+        r = requests.get(
+            url,
+            headers=self.headers,
+            params={"sha": self.branch, "path": path, "per_page": 1},
+            timeout=20,
+        )
+
+        if r.status_code != 200:
+            return {
+                "ok": False,
+                "message": f"No pude consultar commits. Status {r.status_code}",
+                "details": r.text[:500],
+            }
+
+        commits = r.json()
+        if not commits:
+            return {"ok": True, "exists": False}
+
+        c = commits[0]
+        commit = c.get("commit", {})
+        author = commit.get("author", {}) or {}
+
+        return {
+            "ok": True,
+            "exists": True,
+            "sha": c.get("sha"),
+            "html_url": c.get("html_url"),
+            "message": commit.get("message"),
+            "author_name": author.get("name"),
+            "author_date": author.get("date"),
+        }
+
     def _get_existing_sha(self, path: str):
         url = f"{self.api_base}/repos/{self.repo}/contents/{path}"
         r = requests.get(url, headers=self.headers, params={"ref": self.branch}, timeout=20)

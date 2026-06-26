@@ -1,3 +1,3 @@
 # GridoPlanner Labs
 
-Versión 0.4.0: actualizar Maestro y Carrito en GitHub. Sin pandas.
+Versión 0.5.0: Centro de Datos + actualización Maestro/Carrito.

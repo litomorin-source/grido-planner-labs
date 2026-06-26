@@ -18,6 +18,91 @@ def status_line(ok: bool, label: str, detail: str = ""):
     else:
         st.error(f"❌ {label}" + (f" — {detail}" if detail else ""))
 
+def format_size(size_bytes):
+    if size_bytes is None:
+        return "-"
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes / (1024 * 1024):.2f} MB"
+
+def short_sha(sha):
+    if not sha:
+        return "-"
+    return sha[:7]
+
+def render_file_status(nombre, info):
+    st.markdown(f"### {nombre}")
+
+    if not info["ok"]:
+        st.error(info["message"])
+        if info.get("details"):
+            st.code(info["details"])
+        return
+
+    if not info["exists"]:
+        st.warning("Archivo no encontrado en GitHub.")
+        st.caption(info["path"])
+        return
+
+    commit = info.get("commit") or {}
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Estado", "Cargado")
+    col2.metric("Tamaño", format_size(info.get("size")))
+    col3.metric("SHA archivo", short_sha(info.get("sha")))
+
+    st.write("Ruta:")
+    st.code(info.get("path"))
+
+    if commit.get("ok") and commit.get("exists"):
+        st.write("Última actualización:")
+        st.code(commit.get("author_date") or "-")
+
+        st.write("Último commit:")
+        st.code(short_sha(commit.get("sha")))
+
+        st.write("Mensaje:")
+        st.code(commit.get("message") or "-")
+
+        if commit.get("author_name"):
+            st.caption(f"Autor: {commit.get('author_name')}")
+
+        if commit.get("html_url"):
+            st.link_button("Ver último commit", commit["html_url"], use_container_width=True)
+    else:
+        st.warning("No pude obtener el último commit del archivo.")
+
+    if info.get("html_url"):
+        st.link_button("Ver archivo en GitHub", info["html_url"], use_container_width=True)
+
+def render_centro_datos(github):
+    st.header("Centro de Datos")
+    st.caption("Consulta el estado actual de los archivos guardados en GitHub.")
+
+    if st.button("Actualizar estado", use_container_width=True):
+        st.session_state["data_status"] = {
+            "maestro": github.get_file_info(MAESTRO_GITHUB_PATH),
+            "carrito": github.get_file_info(CARRITO_GITHUB_PATH),
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        }
+
+    if "data_status" not in st.session_state:
+        st.session_state["data_status"] = {
+            "maestro": github.get_file_info(MAESTRO_GITHUB_PATH),
+            "carrito": github.get_file_info(CARRITO_GITHUB_PATH),
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        }
+
+    st.caption(f"Consulta UTC: {st.session_state['data_status']['timestamp']}")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        render_file_status("Maestro", st.session_state["data_status"]["maestro"])
+    with col_b:
+        render_file_status("Carrito", st.session_state["data_status"]["carrito"])
+
 def subir_archivo_validado(label, uploader_label, destino, validator, filename, github):
     st.subheader(label)
     st.caption(f"Destino en GitHub: `{destino}`")
@@ -57,7 +142,7 @@ def subir_archivo_validado(label, uploader_label, destino, validator, filename, 
 
         if st.button(f"Guardar {label} en GitHub", type="primary", use_container_width=True, key=f"btn_{destino}"):
             timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-            commit_message = f"Labs 0.4.0 - actualizar {label} ({timestamp})"
+            commit_message = f"Labs 0.5.0 - actualizar {label} ({timestamp})"
 
             with st.spinner(f"Subiendo {label} a GitHub..."):
                 result = github.upload_bytes_file(
@@ -70,6 +155,9 @@ def subir_archivo_validado(label, uploader_label, destino, validator, filename, 
                 st.success(f"{label} guardado en GitHub correctamente.")
                 st.write("Commit:")
                 st.code(result.get("commit"))
+
+                st.session_state.pop("data_status", None)
+
                 if result.get("html_url"):
                     st.link_button("Ver commit en GitHub", result["html_url"], use_container_width=True)
             else:
@@ -79,7 +167,6 @@ def subir_archivo_validado(label, uploader_label, destino, validator, filename, 
 def render_home():
     st.title("🍦 GridoPlanner Labs")
     st.caption(APP_VERSION)
-    st.info("Labs 0.4.0: actualizar Maestro y Carrito en GitHub con validación y commit automático.")
 
     config = get_github_config()
     status_line(config["ok"], "Secrets encontrados")
@@ -112,22 +199,28 @@ def render_home():
                     st.write("Último commit:")
                     st.code(branch.get("commit_sha"))
 
-    st.markdown("---")
-    subir_archivo_validado(
-        label="Maestro",
-        uploader_label="Subir Maestro_Productos_Grido.xlsx",
-        destino=MAESTRO_GITHUB_PATH,
-        validator=validar_maestro,
-        filename="Maestro_Productos_Grido.xlsx",
-        github=github,
-    )
+    tab1, tab2 = st.tabs(["Centro de Datos", "Actualizar archivos"])
 
-    st.markdown("---")
-    subir_archivo_validado(
-        label="Carrito",
-        uploader_label="Subir Modelo_de_Carrito.xlsx",
-        destino=CARRITO_GITHUB_PATH,
-        validator=validar_carrito,
-        filename="Modelo_de_Carrito.xlsx",
-        github=github,
-    )
+    with tab1:
+        render_centro_datos(github)
+
+    with tab2:
+        subir_archivo_validado(
+            label="Maestro",
+            uploader_label="Subir Maestro_Productos_Grido.xlsx",
+            destino=MAESTRO_GITHUB_PATH,
+            validator=validar_maestro,
+            filename="Maestro_Productos_Grido.xlsx",
+            github=github,
+        )
+
+        st.markdown("---")
+
+        subir_archivo_validado(
+            label="Carrito",
+            uploader_label="Subir Modelo_de_Carrito.xlsx",
+            destino=CARRITO_GITHUB_PATH,
+            validator=validar_carrito,
+            filename="Modelo_de_Carrito.xlsx",
+            github=github,
+        )
