@@ -20,8 +20,7 @@ def status_line(ok: bool, label: str, detail: str = ""):
 def render_home():
     st.title("🍦 GridoPlanner Labs")
     st.caption(APP_VERSION)
-
-    st.info("Labs 0.3.0 permite validar y actualizar el Maestro en GitHub con commit automático.")
+    st.info("Labs 0.3.1: validar y actualizar el Maestro en GitHub con commit automático.")
 
     config = get_github_config()
     status_line(config["ok"], "Secrets encontrados")
@@ -56,7 +55,6 @@ def render_home():
 
     st.markdown("---")
     st.subheader("Actualizar Maestro")
-
     st.caption(f"Destino en GitHub: `{MAESTRO_GITHUB_PATH}`")
 
     maestro_file = st.file_uploader(
@@ -87,7 +85,7 @@ def render_home():
 
                 if st.button("Guardar Maestro en GitHub", type="primary", use_container_width=True):
                     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-                    commit_message = f"Labs 0.3.0 - actualizar Maestro ({timestamp})"
+                    commit_message = f"Labs 0.3.1 - actualizar Maestro ({timestamp})"
 
                     with st.spinner("Subiendo Maestro a GitHub..."):
                         result = github.upload_bytes_file(
@@ -109,4 +107,4 @@ def render_home():
             else:
                 st.error("El Maestro no pasó la validación.")
                 for err in errores:
-                    st.error(err)\n
+                    st.error(err)

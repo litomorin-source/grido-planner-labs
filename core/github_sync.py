@@ -17,18 +17,18 @@ class GitHubSync:
         }
 
     def check_repo(self):
-        response = requests.get(f"{self.api_base}/repos/{self.repo}", headers=self.headers, timeout=20)
-        if response.status_code == 200:
-            data = response.json()
+        r = requests.get(f"{self.api_base}/repos/{self.repo}", headers=self.headers, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
             return {"ok": True, "message": "Repositorio accesible", "default_branch": data.get("default_branch")}
-        return {"ok": False, "message": f"No pude acceder al repositorio. Status {response.status_code}", "details": response.text[:500]}
+        return {"ok": False, "message": f"No pude acceder al repositorio. Status {r.status_code}", "details": r.text[:500]}
 
     def check_branch(self):
-        response = requests.get(f"{self.api_base}/repos/{self.repo}/branches/{self.branch}", headers=self.headers, timeout=20)
-        if response.status_code == 200:
-            data = response.json()
+        r = requests.get(f"{self.api_base}/repos/{self.repo}/branches/{self.branch}", headers=self.headers, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
             return {"ok": True, "message": f"Rama {self.branch} encontrada", "commit_sha": data.get("commit", {}).get("sha")}
-        return {"ok": False, "message": f"No pude acceder a la rama {self.branch}. Status {response.status_code}", "details": response.text[:500]}
+        return {"ok": False, "message": f"No pude acceder a la rama {self.branch}. Status {r.status_code}", "details": r.text[:500]}
 
     def verify(self):
         repo_check = self.check_repo()
@@ -39,19 +39,17 @@ class GitHubSync:
 
     def _get_existing_sha(self, path: str):
         url = f"{self.api_base}/repos/{self.repo}/contents/{path}"
-        response = requests.get(url, headers=self.headers, params={"ref": self.branch}, timeout=20)
+        r = requests.get(url, headers=self.headers, params={"ref": self.branch}, timeout=20)
 
-        if response.status_code == 200:
-            return {"ok": True, "exists": True, "sha": response.json().get("sha")}
-        if response.status_code == 404:
-            return {"ok": True, "exists": False, "sha": None}
+        if r.status_code == 200:
+            return {"ok": True, "sha": r.json().get("sha")}
+        if r.status_code == 404:
+            return {"ok": True, "sha": None}
 
         return {
             "ok": False,
-            "exists": None,
-            "sha": None,
-            "message": f"No pude consultar archivo existente. Status {response.status_code}",
-            "details": response.text[:800],
+            "message": f"No pude consultar archivo existente. Status {r.status_code}",
+            "details": r.text[:800],
         }
 
     def upload_bytes_file(self, path: str, content_bytes: bytes, commit_message: str):
@@ -69,10 +67,10 @@ class GitHubSync:
         if sha_result["sha"]:
             payload["sha"] = sha_result["sha"]
 
-        response = requests.put(url, headers=self.headers, json=payload, timeout=30)
+        r = requests.put(url, headers=self.headers, json=payload, timeout=30)
 
-        if response.status_code in (200, 201):
-            data = response.json()
+        if r.status_code in (200, 201):
+            data = r.json()
             commit = data.get("commit", {})
             return {
                 "ok": True,
@@ -84,6 +82,6 @@ class GitHubSync:
 
         return {
             "ok": False,
-            "message": f"No pude subir archivo. Status {response.status_code}",
-            "details": response.text[:1000],
-        }\n
+            "message": f"No pude subir archivo. Status {r.status_code}",
+            "details": r.text[:1000],
+        }
