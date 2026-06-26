@@ -1,1 +1,0 @@
-APP_VERSION = "Labs 0.3.0"

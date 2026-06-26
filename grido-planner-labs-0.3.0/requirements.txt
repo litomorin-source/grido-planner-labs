@@ -1,1 +1,0 @@
-streamlit\nrequests\npandas\nopenpyxl\n
