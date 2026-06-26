@@ -60,3 +60,65 @@ def validar_maestro(maestro_path):
 
     wb.close()
     return len(errores) == 0, errores, advertencias
+
+
+def validar_carrito(carrito_path):
+    errores = []
+    advertencias = []
+
+    try:
+        wb = load_workbook(carrito_path, read_only=True, data_only=True)
+    except Exception as e:
+        return False, [f"No pude abrir el Excel del carrito. Error: {e}"], []
+
+    if len(wb.sheetnames) < 1:
+        wb.close()
+        return False, ["El carrito debe tener al menos una hoja."], []
+
+    ws = wb[wb.sheetnames[0]]
+
+    if ws.max_row < 2:
+        errores.append("El carrito no tiene datos suficientes.")
+    if ws.max_column < 9:
+        errores.append("El carrito debe tener al menos 9 columnas. Se espera código en columna B y precio en columna I.")
+
+    if errores:
+        wb.close()
+        return False, errores, advertencias
+
+    codigos_validos = 0
+    precios_validos = 0
+    filas_con_datos = 0
+
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        codigo = row[1] if len(row) >= 2 else None
+        precio = row[8] if len(row) >= 9 else None
+
+        tiene_datos = any(cell is not None and str(cell).strip() != "" for cell in row)
+        if tiene_datos:
+            filas_con_datos += 1
+
+        if codigo is not None and str(codigo).strip() != "":
+            codigos_validos += 1
+
+        try:
+            if precio is not None and str(precio).strip() != "":
+                float(precio)
+                precios_validos += 1
+        except Exception:
+            pass
+
+    if filas_con_datos == 0:
+        errores.append("El carrito no contiene filas con datos.")
+
+    if codigos_validos == 0:
+        errores.append("No encontré códigos válidos en la columna B.")
+
+    if precios_validos == 0:
+        errores.append("No encontré precios numéricos válidos en la columna I.")
+
+    if codigos_validos > 0 and precios_validos > 0 and codigos_validos != precios_validos:
+        advertencias.append(f"Códigos válidos: {codigos_validos}. Precios válidos: {precios_validos}. Revisar si hay filas incompletas.")
+
+    wb.close()
+    return len(errores) == 0, errores, advertencias
