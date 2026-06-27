@@ -2,14 +2,12 @@
 
 ## Versión
 
-0.8.0
+0.8.1
 
 ## Cambios
 
-- Pantalla principal orientada a usuario.
-- Modo Usuario / Administrador.
-- Administración protegida por PIN.
-- Centro de Datos solo en modo Administrador.
-- Actualización de Maestro y Carrito solo en modo Administrador.
-- Generación de pedido usando Maestro y Carrito desde GitHub.
+- Corrige validación demasiado permisiva de Maestro y Carrito.
+- Maestro ahora exige hojas, columnas y cantidad mínima de datos reales.
+- Carrito ahora exige varios códigos válidos en columna B, precios positivos en columna I y descripción.
+- Mantiene modo Usuario / Administrador con PIN.
 - Sin tutorial por ahora.
