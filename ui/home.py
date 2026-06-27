@@ -300,6 +300,193 @@ def render_diagnostico_pedido(result):
             st.success("No se detectaron alertas principales.")
 
 
+def _scenario_value(result, key, default=0):
+    try:
+        return float(result.get(key, default))
+    except Exception:
+        return default
+
+
+def _pedido_metrics(result):
+    pedido = result["pedido"].copy()
+    packs = int(pd.to_numeric(pedido.get("Packs a Comprar", 0), errors="coerce").fillna(0).sum())
+    productos_con_pedido = int((pd.to_numeric(pedido.get("Packs a Comprar", 0), errors="coerce").fillna(0) > 0).sum())
+    valor_pedido = _scenario_value(result, "valor_pedido_total", 0)
+    valor_stock = _scenario_value(result, "valor_stock_total", 0)
+    return {
+        "productos_en_pedido": productos_con_pedido,
+        "packs_sugeridos": packs,
+        "valor_pedido": valor_pedido,
+        "valor_stock": valor_stock,
+    }
+
+
+def render_simulador_parametros(paths, maestro_path, carrito_path, base_params, tmp):
+    st.markdown("---")
+    st.header("Simulador de parámetros")
+    st.caption("Compara escenarios usando los mismos archivos cargados, sin volver a subir nada.")
+
+    with st.expander("Configurar escenarios", expanded=False):
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            st.subheader("Escenario A")
+            a_nombre = st.text_input("Nombre A", value="Conservador", key="sim_a_nombre")
+            a_sem = st.number_input("Semanas objetivo A", min_value=0.5, max_value=12.0, value=max(float(base_params["Semanas objetivo"]) - 1, 0.5), step=0.5, key="sim_a_sem")
+            a_rep = st.number_input("Reposición A", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key="sim_a_rep")
+            a_dias = st.number_input("Días A", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key="sim_a_dias")
+
+        with c2:
+            st.subheader("Escenario B")
+            b_nombre = st.text_input("Nombre B", value="Actual", key="sim_b_nombre")
+            b_sem = st.number_input("Semanas objetivo B", min_value=0.5, max_value=12.0, value=float(base_params["Semanas objetivo"]), step=0.5, key="sim_b_sem")
+            b_rep = st.number_input("Reposición B", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key="sim_b_rep")
+            b_dias = st.number_input("Días B", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key="sim_b_dias")
+
+        with c3:
+            st.subheader("Escenario C")
+            c_nombre = st.text_input("Nombre C", value="Mayor cobertura", key="sim_c_nombre")
+            c_sem = st.number_input("Semanas objetivo C", min_value=0.5, max_value=12.0, value=min(float(base_params["Semanas objetivo"]) + 1, 12.0), step=0.5, key="sim_c_sem")
+            c_rep = st.number_input("Reposición C", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key="sim_c_rep")
+            c_dias = st.number_input("Días C", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key="sim_c_dias")
+
+    if not st.button("SIMULAR ESCENARIOS", use_container_width=True):
+        return
+
+    escenarios = [
+        {
+            "nombre": a_nombre,
+            "Semanas objetivo": a_sem,
+            "Tiempo de reposición": a_rep,
+            "Días analizados": a_dias,
+        },
+        {
+            "nombre": b_nombre,
+            "Semanas objetivo": b_sem,
+            "Tiempo de reposición": b_rep,
+            "Días analizados": b_dias,
+        },
+        {
+            "nombre": c_nombre,
+            "Semanas objetivo": c_sem,
+            "Tiempo de reposición": c_rep,
+            "Días analizados": c_dias,
+        },
+    ]
+
+    resultados = []
+    pedidos_por_escenario = {}
+
+    with st.spinner("Simulando escenarios..."):
+        for i, esc in enumerate(escenarios, start=1):
+            out = tmp / f"Pedido_Simulacion_{i}.xlsx"
+            res = procesar_archivos(
+                stock_file=paths["stock"],
+                sabores_file=paths["sabores"],
+                data_file=paths["data"],
+                maestro_file=maestro_path,
+                output_file=out,
+                overrides={
+                    "Semanas objetivo": esc["Semanas objetivo"],
+                    "Tiempo de reposición": esc["Tiempo de reposición"],
+                    "Días analizados": esc["Días analizados"],
+                },
+                carrito_file=carrito_path,
+            )
+
+            metrics = _pedido_metrics(res)
+            resultados.append({
+                "Escenario": esc["nombre"],
+                "Semanas objetivo": esc["Semanas objetivo"],
+                "Reposición": esc["Tiempo de reposición"],
+                "Días analizados": esc["Días analizados"],
+                "Productos en pedido": metrics["productos_en_pedido"],
+                "Packs sugeridos": metrics["packs_sugeridos"],
+                "Valor pedido": int(metrics["valor_pedido"]),
+                "Valor stock": int(metrics["valor_stock"]),
+            })
+
+            tmp_pedido = res["pedido"].copy()
+            tmp_pedido["Escenario"] = esc["nombre"]
+            pedidos_por_escenario[esc["nombre"]] = tmp_pedido
+
+    resumen = pd.DataFrame(resultados)
+
+    base_nombre = b_nombre
+    base_row = resumen[resumen["Escenario"] == base_nombre].iloc[0]
+
+    resumen["Dif. valor pedido vs Actual"] = resumen["Valor pedido"] - int(base_row["Valor pedido"])
+    resumen["Dif. packs vs Actual"] = resumen["Packs sugeridos"] - int(base_row["Packs sugeridos"])
+
+    st.subheader("Comparación de escenarios")
+
+    resumen_mostrar = resumen.copy()
+    for col in ["Valor pedido", "Valor stock", "Dif. valor pedido vs Actual"]:
+        resumen_mostrar[col] = resumen_mostrar[col].apply(formato_moneda_ar)
+
+    st.dataframe(resumen_mostrar, use_container_width=True)
+
+    col_a, col_b, col_c = st.columns(3)
+
+    for idx, row in resumen.iterrows():
+        with [col_a, col_b, col_c][idx]:
+            st.metric(
+                row["Escenario"],
+                formato_moneda_ar(row["Valor pedido"]),
+                formato_moneda_ar(row["Dif. valor pedido vs Actual"])
+            )
+            st.caption(f"Packs: {int(row['Packs sugeridos'])} ({int(row['Dif. packs vs Actual']):+d} vs Actual)")
+
+    st.subheader("Productos que más cambian")
+
+    try:
+        base_pedido = pedidos_por_escenario[base_nombre][["Producto", "Packs a Comprar", "Valor Pedido Sugerido"]].copy()
+        base_pedido = base_pedido.rename(columns={
+            "Packs a Comprar": "Packs Actual",
+            "Valor Pedido Sugerido": "Valor Actual",
+        })
+
+        comparaciones = []
+
+        for esc_nombre, pedido_esc in pedidos_por_escenario.items():
+            if esc_nombre == base_nombre:
+                continue
+
+            p = pedido_esc[["Producto", "Packs a Comprar", "Valor Pedido Sugerido"]].copy()
+            p = p.rename(columns={
+                "Packs a Comprar": f"Packs {esc_nombre}",
+                "Valor Pedido Sugerido": f"Valor {esc_nombre}",
+            })
+
+            merged = base_pedido.merge(p, on="Producto", how="outer").fillna(0)
+            merged["Escenario comparado"] = esc_nombre
+            merged["Dif. packs"] = pd.to_numeric(merged[f"Packs {esc_nombre}"], errors="coerce").fillna(0) - pd.to_numeric(merged["Packs Actual"], errors="coerce").fillna(0)
+            merged["Dif. valor"] = pd.to_numeric(merged[f"Valor {esc_nombre}"], errors="coerce").fillna(0) - pd.to_numeric(merged["Valor Actual"], errors="coerce").fillna(0)
+
+            comparaciones.append(merged)
+
+        if comparaciones:
+            cambios = pd.concat(comparaciones, ignore_index=True)
+            cambios["Abs dif valor"] = cambios["Dif. valor"].abs()
+            cambios = cambios.sort_values("Abs dif valor", ascending=False).head(30)
+
+            cambios_mostrar = cambios[[
+                "Escenario comparado",
+                "Producto",
+                "Packs Actual",
+                "Dif. packs",
+                "Valor Actual",
+                "Dif. valor",
+            ]].copy()
+
+            cambios_mostrar["Valor Actual"] = cambios_mostrar["Valor Actual"].apply(formato_moneda_ar)
+            cambios_mostrar["Dif. valor"] = cambios_mostrar["Dif. valor"].apply(formato_moneda_ar)
+
+            st.dataframe(cambios_mostrar, use_container_width=True)
+    except Exception as e:
+        st.warning(f"No pude calcular el detalle de cambios por producto: {e}")
+
+
 def render_generar_pedido(github):
     st.header("Generar pedido")
     st.caption("Subí Stock, Sabores y Power BI. El Maestro y el Carrito vigentes se toman automáticamente.")
@@ -430,6 +617,18 @@ def render_generar_pedido(github):
                 stock_negativo = result.get("stock_negativo")
                 st.success("Pedido analizado correctamente.")
                 render_diagnostico_pedido(result)
+
+                render_simulador_parametros(
+                    paths=paths,
+                    maestro_path=maestro_path,
+                    carrito_path=carrito_path,
+                    base_params={
+                        "Semanas objetivo": semanas_objetivo,
+                        "Tiempo de reposición": tiempo_reposicion,
+                        "Días analizados": dias_analizados,
+                    },
+                    tmp=tmp,
+                )
 
                 st.markdown("---")
                 st.header("Resumen final")
