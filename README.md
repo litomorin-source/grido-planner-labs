@@ -2,15 +2,31 @@
 
 ## Versión
 
-Labs 2.1.1
+Labs 2.2.0
 
-## Corrección
+## Objetivo
 
-- Corrige el botón SIMULAR ESCENARIOS.
-- El simulador ahora usa `session_state` y conserva el último análisis.
-- Al tocar SIMULAR ESCENARIOS, la app puede recalcular los escenarios aunque Streamlit haga rerun.
+Agregar control de cambios del Maestro antes de guardarlo en GitHub.
+
+## Funcionalidad nueva
+
+Cuando el administrador sube un Maestro nuevo:
+
+- Se valida estructura.
+- Se descarga el Maestro vigente desde GitHub.
+- Se comparan productos.
+- Se muestran:
+  - productos agregados,
+  - productos eliminados,
+  - cambios en código de compra,
+  - cambios en producto compra,
+  - cambios en compra mínima,
+  - cambios en activo,
+  - cambios en excluir,
+  - cambios en tipo producto.
+- Si hay productos eliminados, exige confirmación explícita antes de guardar.
 
 ## Base
 
-Deriva de Labs 2.1.0.
+Deriva de Labs 2.1.1.
 No modifica producción.

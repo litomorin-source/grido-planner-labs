@@ -9,6 +9,7 @@ from core.config import get_github_config
 from core.github_sync import GitHubSync
 from core.validators import validar_maestro, validar_carrito
 from core.version import APP_VERSION
+from core.maestro_diff import comparar_maestros
 
 from motor import (
     procesar_archivos,
@@ -154,27 +155,104 @@ def subir_archivo_validado(label, uploader_label, destino, validator, filename, 
     st.subheader(label)
     st.caption(f"Destino en GitHub: `{destino}`")
     uploaded_file = st.file_uploader(uploader_label, type=["xlsx"], key=destino)
+
     if not uploaded_file:
         return
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir) / filename
         file_bytes = uploaded_file.getvalue()
         tmp_path.write_bytes(file_bytes)
+
         ok, errores, _ = validator(tmp_path)
+
         if not ok:
             st.error("El archivo no pasó la validación.")
             for err in errores:
                 st.error(err)
             return
+
         st.success("Archivo validado correctamente.")
+
         col1, col2 = st.columns(2)
         col1.metric("Tamaño archivo", f"{len(file_bytes) / 1024:.1f} KB")
         col2.metric("Destino", destino)
-        if st.button(f"Guardar {label} en GitHub", type="primary", use_container_width=True, key=f"btn_{destino}"):
+
+        permitir_guardar = True
+
+        if label == "Maestro":
+            st.markdown("---")
+            st.subheader("Control de cambios del Maestro")
+
+            actual = github.download_file_bytes(destino)
+
+            if not actual.get("ok"):
+                st.warning("No pude descargar el Maestro vigente para comparar. Si es la primera carga, podés guardarlo igual.")
+                st.caption(actual.get("message", ""))
+            else:
+                actual_path = Path(tmp_dir) / "Maestro_Actual_GitHub.xlsx"
+                actual_path.write_bytes(actual["content_bytes"])
+
+                try:
+                    diff = comparar_maestros(actual_path, tmp_path)
+                    resumen = diff["resumen"]
+
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("Productos actual", resumen["productos_actual"])
+                    c2.metric("Productos nuevo", resumen["productos_nuevo"])
+                    c3.metric("Agregados", resumen["agregados"])
+                    c4.metric("Eliminados", resumen["eliminados"])
+                    c5.metric("Cambios", resumen["cambios"])
+
+                    if resumen["eliminados"] > 0:
+                        st.error("Atención: el nuevo Maestro elimina productos existentes.")
+                        permitir_guardar = st.checkbox(
+                            "Confirmo que revisé los productos eliminados y quiero permitir el guardado.",
+                            value=False,
+                            key="confirmar_eliminados_maestro",
+                        )
+
+                    if resumen["cambios"] > 0:
+                        st.warning("Hay productos existentes con cambios. Revisar antes de guardar.")
+
+                    tabs = st.tabs(["Agregados", "Eliminados", "Cambios"])
+
+                    with tabs[0]:
+                        if len(diff["agregados"]) == 0:
+                            st.success("No hay productos agregados.")
+                        else:
+                            st.dataframe(diff["agregados"], use_container_width=True)
+
+                    with tabs[1]:
+                        if len(diff["eliminados"]) == 0:
+                            st.success("No hay productos eliminados.")
+                        else:
+                            st.dataframe(diff["eliminados"], use_container_width=True)
+
+                    with tabs[2]:
+                        if len(diff["cambios"]) == 0:
+                            st.success("No hay cambios en productos existentes.")
+                        else:
+                            st.dataframe(diff["cambios"], use_container_width=True)
+
+                except Exception as e:
+                    st.error("No pude comparar el Maestro nuevo contra el vigente.")
+                    st.exception(e)
+                    permitir_guardar = False
+
+        if st.button(
+            f"Guardar {label} en GitHub",
+            type="primary",
+            use_container_width=True,
+            key=f"btn_{destino}",
+            disabled=not permitir_guardar,
+        ):
             timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-            commit_message = f"Labs 0.7.0 - actualizar {label} ({timestamp})"
+            commit_message = f"Labs 2.2.0 - actualizar {label} ({timestamp})"
+
             with st.spinner(f"Subiendo {label} a GitHub..."):
                 result = github.upload_bytes_file(path=destino, content_bytes=file_bytes, commit_message=commit_message)
+
             if result["ok"]:
                 st.success(f"{label} guardado en GitHub correctamente.")
                 st.write("Commit:")
@@ -185,7 +263,6 @@ def subir_archivo_validado(label, uploader_label, destino, validator, filename, 
             else:
                 st.error(result["message"])
                 st.code(result.get("details", ""))
-
 
 def _ventas_col(pedido):
     for col in pedido.columns:
