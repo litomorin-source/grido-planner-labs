@@ -2,22 +2,46 @@ from datetime import datetime
 import tempfile
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 from core.config import get_github_config
 from core.github_sync import GitHubSync
 from core.validators import validar_maestro, validar_carrito
-from core.excel_reader import summarize_workbook, summarize_carrito
 from core.version import APP_VERSION
+
+from motor import (
+    procesar_archivos,
+    procesar_costo_stock,
+    validar_stock,
+    validar_sabores,
+    validar_data,
+)
 
 MAESTRO_GITHUB_PATH = "data/Maestro_Productos_Grido.xlsx"
 CARRITO_GITHUB_PATH = "data/Modelo_de_Carrito.xlsx"
+
+
+def formato_moneda_ar(valor):
+    try:
+        valor = int(float(valor))
+    except Exception:
+        valor = 0
+    signo = "-" if valor < 0 else ""
+    entero_txt = f"{abs(valor):,}".replace(",", ".")
+    return f"$ {signo}{entero_txt}"
+
 
 def status_line(ok: bool, label: str, detail: str = ""):
     if ok:
         st.success(f"✅ {label}" + (f" — {detail}" if detail else ""))
     else:
         st.error(f"❌ {label}" + (f" — {detail}" if detail else ""))
+
+
+def short_sha(sha):
+    return sha[:7] if sha else "-"
+
 
 def format_size(size_bytes):
     if size_bytes is None:
@@ -28,268 +52,365 @@ def format_size(size_bytes):
         return f"{size_bytes / 1024:.1f} KB"
     return f"{size_bytes / (1024 * 1024):.2f} MB"
 
-def short_sha(sha):
-    if not sha:
-        return "-"
-    return sha[:7]
 
-def render_file_status(nombre, info):
-    st.markdown(f"### {nombre}")
+def detectar_grupos_powerbi(file_path):
+    try:
+        df = pd.read_excel(file_path)
+        if df.shape[1] < 13:
+            return [], "El archivo tiene menos columnas de las esperadas."
+        df.columns = [
+            "Categoria", "SubCategoria", "Grupo", "Producto",
+            "PL_Cant", "PL_Fact", "PL_Kilos", "PL_Porc",
+            "Promo_Cant", "Promo_Fact", "Promo_Kilos", "Promo_Porc",
+            "Total_Cantidad", "Total_Fact", "Total_Kilos", "Total_Porc"
+        ]
+        df = df.iloc[1:].copy()
+        for c in ["Categoria", "SubCategoria", "Grupo"]:
+            df[c] = df[c].ffill()
+        mask = (
+            ((df["Categoria"] == "Heladería") & (df["SubCategoria"] == "Impulsivos"))
+            | ((df["Categoria"] == "Congelados") & (df["Grupo"].isin(["Congelados Multimarca", "Frizzio"])))
+        )
+        df = df[mask & df["Producto"].notna() & (~df["Producto"].astype(str).str.lower().eq("total"))].copy()
+        return sorted([str(g) for g in df["Grupo"].dropna().unique()]), ""
+    except Exception as e:
+        return [], f"No pude leer los grupos del Power BI. Error: {e}"
 
-    if not info["ok"]:
-        st.error(info["message"])
-        if info.get("details"):
-            st.code(info["details"])
-        return
 
-    if not info["exists"]:
-        st.warning("Archivo no encontrado en GitHub.")
-        st.caption(info["path"])
-        return
-
-    commit = info.get("commit") or {}
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Estado", "Cargado")
-    col2.metric("Tamaño", format_size(info.get("size")))
-    col3.metric("SHA archivo", short_sha(info.get("sha")))
-
-    st.write("Ruta:")
-    st.code(info.get("path"))
-
-    if commit.get("ok") and commit.get("exists"):
-        st.write("Última actualización:")
-        st.code(commit.get("author_date") or "-")
-
-        st.write("Último commit:")
-        st.code(short_sha(commit.get("sha")))
-
-        st.write("Mensaje:")
-        st.code(commit.get("message") or "-")
-
-        if commit.get("author_name"):
-            st.caption(f"Autor: {commit.get('author_name')}")
-
-        if commit.get("html_url"):
-            st.link_button("Ver último commit", commit["html_url"], use_container_width=True)
+def estado_archivo(label, ok, msg, detalles=None, warning=None):
+    if ok:
+        st.success(f"✅ {label} OK")
+        if warning:
+            st.warning(warning)
+        if detalles:
+            with st.expander(f"Ver detalles de {label}", expanded=False):
+                for item in detalles:
+                    st.write(f"- {item}")
     else:
-        st.warning("No pude obtener el último commit del archivo.")
+        st.error(f"❌ {label}: {msg}")
+        if detalles:
+            with st.expander("Ver detalle del error", expanded=True):
+                st.write(detalles)
 
-    if info.get("html_url"):
-        st.link_button("Ver archivo en GitHub", info["html_url"], use_container_width=True)
+
+def descargar_base_github(github, tmp):
+    maestro_download = github.download_file_bytes(MAESTRO_GITHUB_PATH)
+    carrito_download = github.download_file_bytes(CARRITO_GITHUB_PATH)
+    if not maestro_download["ok"]:
+        return False, maestro_download.get("message", "Error descargando Maestro"), None, None
+    if not carrito_download["ok"]:
+        return False, carrito_download.get("message", "Error descargando Carrito"), None, None
+    maestro_path = tmp / "Maestro_Productos_Grido.xlsx"
+    carrito_path = tmp / "Modelo_de_Carrito.xlsx"
+    maestro_path.write_bytes(maestro_download["content_bytes"])
+    carrito_path.write_bytes(carrito_download["content_bytes"])
+    ok_m, err_m, _ = validar_maestro(maestro_path)
+    if not ok_m:
+        return False, "El Maestro de GitHub no pasó validación: " + " | ".join(err_m), None, None
+    ok_c, err_c, _ = validar_carrito(carrito_path)
+    if not ok_c:
+        return False, "El Carrito de GitHub no pasó validación: " + " | ".join(err_c), None, None
+    return True, "Base GitHub OK", maestro_path, carrito_path
+
 
 def render_centro_datos(github):
     st.header("Centro de Datos")
-    st.caption("Consulta el estado actual de los archivos guardados en GitHub.")
-
     if st.button("Actualizar estado", use_container_width=True):
         st.session_state["data_status"] = {
             "maestro": github.get_file_info(MAESTRO_GITHUB_PATH),
             "carrito": github.get_file_info(CARRITO_GITHUB_PATH),
             "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
         }
-
     if "data_status" not in st.session_state:
         st.session_state["data_status"] = {
             "maestro": github.get_file_info(MAESTRO_GITHUB_PATH),
             "carrito": github.get_file_info(CARRITO_GITHUB_PATH),
             "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
         }
-
     st.caption(f"Consulta UTC: {st.session_state['data_status']['timestamp']}")
+    for nombre, key in [("Maestro", "maestro"), ("Carrito", "carrito")]:
+        info = st.session_state["data_status"][key]
+        st.subheader(nombre)
+        if not info["ok"]:
+            st.error(info["message"])
+            continue
+        if not info["exists"]:
+            st.warning("Archivo no encontrado en GitHub.")
+            continue
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Estado", "Cargado")
+        col2.metric("Tamaño", format_size(info.get("size")))
+        col3.metric("SHA", short_sha(info.get("sha")))
+        commit = info.get("commit") or {}
+        if commit.get("ok") and commit.get("exists"):
+            st.caption(f"Última actualización: {commit.get('author_date')}")
+            st.code(commit.get("message") or "-")
+        if info.get("html_url"):
+            st.link_button(f"Ver {nombre} en GitHub", info["html_url"], use_container_width=True)
+        st.markdown("---")
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        render_file_status("Maestro", st.session_state["data_status"]["maestro"])
-    with col_b:
-        render_file_status("Carrito", st.session_state["data_status"]["carrito"])
-
-def render_lectura_archivos(github):
-    st.header("Lectura desde GitHub")
-    st.caption("Descarga Maestro y Carrito desde GitHub y los lee dentro de la app.")
-
-    if st.button("Leer archivos desde GitHub", type="primary", use_container_width=True):
-        with st.spinner("Descargando Maestro..."):
-            maestro = github.download_file_bytes(MAESTRO_GITHUB_PATH)
-
-        with st.spinner("Descargando Carrito..."):
-            carrito = github.download_file_bytes(CARRITO_GITHUB_PATH)
-
-        st.session_state["read_test"] = {
-            "maestro": maestro,
-            "carrito": carrito,
-            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
-        }
-
-    if "read_test" not in st.session_state:
-        st.info("Tocá el botón para leer los archivos reales desde GitHub.")
-        return
-
-    st.caption(f"Lectura UTC: {st.session_state['read_test']['timestamp']}")
-
-    maestro = st.session_state["read_test"]["maestro"]
-    carrito = st.session_state["read_test"]["carrito"]
-
-    col_a, col_b = st.columns(2)
-
-    with col_a:
-        st.subheader("Maestro")
-        if not maestro["ok"]:
-            st.error(maestro.get("message"))
-            st.code(maestro.get("details", ""))
-        else:
-            try:
-                summary = summarize_workbook(maestro["content_bytes"])
-                st.success("Maestro leído correctamente.")
-                st.metric("Hojas", summary["sheet_count"])
-                for sheet in summary["sheets"]:
-                    with st.expander(sheet["name"], expanded=False):
-                        st.write(f"Filas detectadas: {sheet['max_row']}")
-                        st.write(f"Columnas detectadas: {sheet['max_column']}")
-                        st.write(f"Filas con datos: {sheet['rows_with_data']}")
-            except Exception as e:
-                st.error(f"No pude leer el Maestro. Error: {e}")
-
-    with col_b:
-        st.subheader("Carrito")
-        if not carrito["ok"]:
-            st.error(carrito.get("message"))
-            st.code(carrito.get("details", ""))
-        else:
-            try:
-                summary = summarize_carrito(carrito["content_bytes"])
-                st.success("Carrito leído correctamente.")
-                st.write("Hoja:")
-                st.code(summary["sheet"])
-                st.metric("Filas con datos", summary["rows_with_data"])
-                st.metric("Códigos válidos columna B", summary["valid_codes_col_b"])
-                st.metric("Precios válidos columna I", summary["valid_prices_col_i"])
-                st.caption(f"Dimensión detectada: {summary['max_row']} filas x {summary['max_column']} columnas")
-            except Exception as e:
-                st.error(f"No pude leer el Carrito. Error: {e}")
 
 def subir_archivo_validado(label, uploader_label, destino, validator, filename, github):
     st.subheader(label)
     st.caption(f"Destino en GitHub: `{destino}`")
-
-    uploaded_file = st.file_uploader(
-        uploader_label,
-        type=["xlsx"],
-        key=destino,
-    )
-
+    uploaded_file = st.file_uploader(uploader_label, type=["xlsx"], key=destino)
     if not uploaded_file:
         return
-
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir) / filename
         file_bytes = uploaded_file.getvalue()
         tmp_path.write_bytes(file_bytes)
-
-        ok, errores, advertencias = validator(tmp_path)
-
+        ok, errores, _ = validator(tmp_path)
         if not ok:
             st.error("El archivo no pasó la validación.")
             for err in errores:
                 st.error(err)
             return
-
         st.success("Archivo validado correctamente.")
-
-        if advertencias:
-            with st.expander("Advertencias", expanded=False):
-                for adv in advertencias:
-                    st.warning(adv)
-
         col1, col2 = st.columns(2)
         col1.metric("Tamaño archivo", f"{len(file_bytes) / 1024:.1f} KB")
         col2.metric("Destino", destino)
-
         if st.button(f"Guardar {label} en GitHub", type="primary", use_container_width=True, key=f"btn_{destino}"):
             timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-            commit_message = f"Labs 0.6.0 - actualizar {label} ({timestamp})"
-
+            commit_message = f"Labs 0.7.0 - actualizar {label} ({timestamp})"
             with st.spinner(f"Subiendo {label} a GitHub..."):
-                result = github.upload_bytes_file(
-                    path=destino,
-                    content_bytes=file_bytes,
-                    commit_message=commit_message,
-                )
-
+                result = github.upload_bytes_file(path=destino, content_bytes=file_bytes, commit_message=commit_message)
             if result["ok"]:
                 st.success(f"{label} guardado en GitHub correctamente.")
                 st.write("Commit:")
                 st.code(result.get("commit"))
-
                 st.session_state.pop("data_status", None)
-                st.session_state.pop("read_test", None)
-
                 if result.get("html_url"):
                     st.link_button("Ver commit en GitHub", result["html_url"], use_container_width=True)
             else:
                 st.error(result["message"])
                 st.code(result.get("details", ""))
 
+
+def render_generar_pedido(github):
+    st.header("Generar pedido")
+    st.caption("Maestro y Carrito se descargan desde GitHub. Solo subís Stock, Sabores y Power BI.")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        stock_file = st.file_uploader("1. Archivo de STOCK", type=["csv"])
+    with col2:
+        sabores_file = st.file_uploader("2. Ventas de SABORES", type=["xlsx"])
+    with col3:
+        data_file = st.file_uploader("3. Ventas Power BI", type=["xlsx"])
+
+    st.subheader("Configuración")
+    cfg1, cfg2, cfg3 = st.columns(3)
+    with cfg1:
+        semanas_objetivo = st.number_input("Semanas objetivo", min_value=0.5, max_value=12.0, value=4.0, step=0.5)
+    with cfg2:
+        tiempo_reposicion = st.number_input("Tiempo de reposición", min_value=0.0, max_value=8.0, value=1.0, step=0.5)
+    with cfg3:
+        dias_analizados = st.number_input("Días analizados", min_value=1, max_value=60, value=14, step=1)
+
+    st.markdown("---")
+    st.subheader("Estado de archivos")
+    ready = True
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        paths = {}
+        with st.spinner("Descargando Maestro y Carrito desde GitHub..."):
+            base_ok, base_msg, maestro_path, carrito_path = descargar_base_github(github, tmp)
+        if base_ok:
+            st.success("✅ Maestro y Carrito desde GitHub OK")
+        else:
+            st.error(base_msg)
+            st.stop()
+
+        if stock_file:
+            p = tmp / "stock.csv"
+            p.write_bytes(stock_file.getvalue())
+            ok, msg = validar_stock(p)
+            estado_archivo("Stock", ok, msg)
+            ready = ready and ok
+            paths["stock"] = p
+        else:
+            ready = False
+            st.info("📄 Stock: pendiente")
+
+        if sabores_file:
+            p = tmp / "cajas_por_sabor.xlsx"
+            p.write_bytes(sabores_file.getvalue())
+            ok, msg = validar_sabores(p)
+            estado_archivo("Sabores", ok, msg)
+            ready = ready and ok
+            paths["sabores"] = p
+        else:
+            ready = False
+            st.info("📄 Sabores: pendiente")
+
+        if data_file:
+            p = tmp / "data.xlsx"
+            p.write_bytes(data_file.getvalue())
+            ok, msg = validar_data(p)
+            grupos, grupo_error = detectar_grupos_powerbi(p)
+            detalles = []
+            if grupos:
+                detalles.append("Grupos detectados en la exportación:")
+                detalles.extend(grupos)
+            if grupo_error:
+                detalles.append(grupo_error)
+            warning = "Revisá que estén todos los grupos esperados. Si no desplegaste el '+', el pedido puede quedar incompleto."
+            estado_archivo("Power BI", ok, msg, detalles=detalles if detalles else None, warning=warning if ok else None)
+            ready = ready and ok
+            paths["data"] = p
+        else:
+            ready = False
+            st.info("📄 Power BI: pendiente")
+
+        st.markdown("---")
+        if "stock" in paths:
+            st.subheader("Informe costo stock")
+            if st.button("GENERAR INFORME COSTO STOCK", use_container_width=True):
+                output_stock = tmp / "Informe_Costo_Stock.xlsx"
+                try:
+                    result_stock = procesar_costo_stock(
+                        stock_file=paths["stock"],
+                        maestro_file=maestro_path,
+                        output_file=output_stock,
+                        carrito_file=carrito_path,
+                    )
+                    st.success("Informe de costo de stock generado correctamente.")
+                    st.metric("Valor stock actual", formato_moneda_ar(result_stock.get("valor_stock_total", 0)))
+                    if result_stock.get("categoria") is not None:
+                        with st.expander("Ver valorización por categoría", expanded=False):
+                            st.dataframe(result_stock["categoria"], use_container_width=True)
+                    st.download_button(
+                        "DESCARGAR INFORME COSTO STOCK",
+                        data=output_stock.read_bytes(),
+                        file_name="Informe_Costo_Stock.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+                except Exception as e:
+                    st.error("Ocurrió un error al generar el informe de costo stock.")
+                    st.exception(e)
+
+        if not ready:
+            st.info("Cuando los 3 archivos estén en OK, se habilita la generación del pedido.")
+            st.stop()
+
+        st.success("✅ Todo listo para generar el pedido.")
+        if st.button("GENERAR PEDIDO", type="primary", use_container_width=True):
+            output = tmp / "Pedido_Final.xlsx"
+            try:
+                result = procesar_archivos(
+                    stock_file=paths["stock"],
+                    sabores_file=paths["sabores"],
+                    data_file=paths["data"],
+                    maestro_file=maestro_path,
+                    output_file=output,
+                    overrides={
+                        "Semanas objetivo": semanas_objetivo,
+                        "Tiempo de reposición": tiempo_reposicion,
+                        "Días analizados": dias_analizados,
+                    },
+                    carrito_file=carrito_path,
+                )
+                pedido = result["pedido"]
+                sin_clasificar = result["sin_clasificar"]
+                posibles_faltantes = result.get("posibles_faltantes")
+                stock_negativo = result.get("stock_negativo")
+                st.success("Pedido generado correctamente.")
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("Productos en pedido", len(pedido))
+                m2.metric("Stock negativo", len(stock_negativo) if stock_negativo is not None else 0)
+                m3.metric("Sin clasificar", len(sin_clasificar))
+                m4.metric("Posibles faltantes", len(posibles_faltantes) if posibles_faltantes is not None else 0)
+                m5.metric("Packs sugeridos", int(pedido["Packs a Comprar"].fillna(0).sum()))
+                v1, v2 = st.columns(2)
+                v1.metric("Valor stock actual", formato_moneda_ar(result.get("valor_stock_total", 0)))
+                v2.metric("Valor pedido sugerido", formato_moneda_ar(result.get("valor_pedido_total", 0)))
+                if result.get("valorizacion_categoria") is not None:
+                    with st.expander("Ver valorización por categoría", expanded=False):
+                        st.dataframe(result["valorizacion_categoria"], use_container_width=True)
+                if result.get("valorizacion_producto") is not None:
+                    with st.expander("Ver valorización por producto", expanded=False):
+                        st.dataframe(result["valorizacion_producto"], use_container_width=True)
+                if stock_negativo is not None and len(stock_negativo) > 0:
+                    st.error("⚠️ Se detectaron productos con stock negativo.")
+                if posibles_faltantes is not None and len(posibles_faltantes) > 0:
+                    st.warning("Se detectaron posibles faltantes.")
+                if len(sin_clasificar) > 0:
+                    st.warning("Hay productos sin clasificar.")
+                st.download_button(
+                    "DESCARGAR PEDIDO FINAL",
+                    data=output.read_bytes(),
+                    file_name="Pedido_Final.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+                with st.expander("Ver vista previa del pedido", expanded=False):
+                    st.dataframe(pedido.head(100), use_container_width=True)
+                if stock_negativo is not None and len(stock_negativo) > 0:
+                    with st.expander("Ver stock negativo", expanded=True):
+                        st.dataframe(stock_negativo, use_container_width=True)
+                if posibles_faltantes is not None and len(posibles_faltantes) > 0:
+                    with st.expander("Ver posibles faltantes", expanded=True):
+                        st.dataframe(posibles_faltantes, use_container_width=True)
+                if len(sin_clasificar) > 0:
+                    with st.expander("Ver productos sin clasificar", expanded=True):
+                        st.dataframe(sin_clasificar, use_container_width=True)
+            except Exception as e:
+                st.error("Ocurrió un error al generar el pedido.")
+                st.exception(e)
+
+
+def render_actualizar_archivos(github):
+    subir_archivo_validado(
+        label="Maestro",
+        uploader_label="Subir Maestro_Productos_Grido.xlsx",
+        destino=MAESTRO_GITHUB_PATH,
+        validator=validar_maestro,
+        filename="Maestro_Productos_Grido.xlsx",
+        github=github,
+    )
+    st.markdown("---")
+    subir_archivo_validado(
+        label="Carrito",
+        uploader_label="Subir Modelo_de_Carrito.xlsx",
+        destino=CARRITO_GITHUB_PATH,
+        validator=validar_carrito,
+        filename="Modelo_de_Carrito.xlsx",
+        github=github,
+    )
+
+
 def render_home():
     st.title("🍦 GridoPlanner Labs")
     st.caption(APP_VERSION)
-
     config = get_github_config()
     status_line(config["ok"], "Secrets encontrados")
-
     if not config["ok"]:
         st.warning("Faltan estos Secrets:")
         for item in config["missing"]:
             st.code(item)
         st.stop()
-
     github = GitHubSync(config["token"], config["repo"], config["branch"])
-
     with st.expander("Estado GitHub", expanded=False):
         st.write("Repositorio:")
         st.code(config["repo"])
         st.write("Rama:")
         st.code(config["branch"])
-
         if st.button("Probar conexión GitHub", use_container_width=True):
             with st.spinner("Conectando..."):
                 result = github.verify()
-
             repo = result.get("repo")
             branch = result.get("branch")
-
             status_line(repo["ok"], "Repositorio accesible", repo.get("message", ""))
             if branch:
                 status_line(branch["ok"], "Rama encontrada", branch.get("message", ""))
                 if branch.get("ok"):
                     st.write("Último commit:")
                     st.code(branch.get("commit_sha"))
-
-    tab1, tab2, tab3 = st.tabs(["Centro de Datos", "Leer archivos", "Actualizar archivos"])
-
+    tab1, tab2, tab3 = st.tabs(["Generar pedido", "Centro de Datos", "Actualizar archivos"])
     with tab1:
-        render_centro_datos(github)
-
+        render_generar_pedido(github)
     with tab2:
-        render_lectura_archivos(github)
-
+        render_centro_datos(github)
     with tab3:
-        subir_archivo_validado(
-            label="Maestro",
-            uploader_label="Subir Maestro_Productos_Grido.xlsx",
-            destino=MAESTRO_GITHUB_PATH,
-            validator=validar_maestro,
-            filename="Maestro_Productos_Grido.xlsx",
-            github=github,
-        )
-
-        st.markdown("---")
-
-        subir_archivo_validado(
-            label="Carrito",
-            uploader_label="Subir Modelo_de_Carrito.xlsx",
-            destino=CARRITO_GITHUB_PATH,
-            validator=validar_carrito,
-            filename="Modelo_de_Carrito.xlsx",
-            github=github,
-        )
+        render_actualizar_archivos(github)
