@@ -321,10 +321,12 @@ def _pedido_metrics(result):
     }
 
 
-def render_simulador_parametros(paths, maestro_path, carrito_path, base_params, tmp):
+def render_simulador_parametros(snapshot):
     st.markdown("---")
     st.header("Simulador de parámetros")
-    st.caption("Compara escenarios usando los mismos archivos cargados, sin volver a subir nada.")
+    st.caption("Compara escenarios usando los mismos archivos del último análisis.")
+
+    base_params = snapshot["base_params"]
 
     with st.expander("Configurar escenarios", expanded=False):
         c1, c2, c3 = st.columns(3)
@@ -354,61 +356,61 @@ def render_simulador_parametros(paths, maestro_path, carrito_path, base_params, 
         return
 
     escenarios = [
-        {
-            "nombre": a_nombre,
-            "Semanas objetivo": a_sem,
-            "Tiempo de reposición": a_rep,
-            "Días analizados": a_dias,
-        },
-        {
-            "nombre": b_nombre,
-            "Semanas objetivo": b_sem,
-            "Tiempo de reposición": b_rep,
-            "Días analizados": b_dias,
-        },
-        {
-            "nombre": c_nombre,
-            "Semanas objetivo": c_sem,
-            "Tiempo de reposición": c_rep,
-            "Días analizados": c_dias,
-        },
+        {"nombre": a_nombre, "Semanas objetivo": a_sem, "Tiempo de reposición": a_rep, "Días analizados": a_dias},
+        {"nombre": b_nombre, "Semanas objetivo": b_sem, "Tiempo de reposición": b_rep, "Días analizados": b_dias},
+        {"nombre": c_nombre, "Semanas objetivo": c_sem, "Tiempo de reposición": c_rep, "Días analizados": c_dias},
     ]
 
     resultados = []
     pedidos_por_escenario = {}
 
-    with st.spinner("Simulando escenarios..."):
-        for i, esc in enumerate(escenarios, start=1):
-            out = tmp / f"Pedido_Simulacion_{i}.xlsx"
-            res = procesar_archivos(
-                stock_file=paths["stock"],
-                sabores_file=paths["sabores"],
-                data_file=paths["data"],
-                maestro_file=maestro_path,
-                output_file=out,
-                overrides={
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+
+        stock_path = tmp / "stock.csv"
+        sabores_path = tmp / "cajas_por_sabor.xlsx"
+        data_path = tmp / "data.xlsx"
+        maestro_path = tmp / "Maestro_Productos_Grido.xlsx"
+        carrito_path = tmp / "Modelo_de_Carrito.xlsx"
+
+        stock_path.write_bytes(snapshot["stock_bytes"])
+        sabores_path.write_bytes(snapshot["sabores_bytes"])
+        data_path.write_bytes(snapshot["data_bytes"])
+        maestro_path.write_bytes(snapshot["maestro_bytes"])
+        carrito_path.write_bytes(snapshot["carrito_bytes"])
+
+        with st.spinner("Simulando escenarios..."):
+            for i, esc in enumerate(escenarios, start=1):
+                out = tmp / f"Pedido_Simulacion_{i}.xlsx"
+                res = procesar_archivos(
+                    stock_file=stock_path,
+                    sabores_file=sabores_path,
+                    data_file=data_path,
+                    maestro_file=maestro_path,
+                    output_file=out,
+                    overrides={
+                        "Semanas objetivo": esc["Semanas objetivo"],
+                        "Tiempo de reposición": esc["Tiempo de reposición"],
+                        "Días analizados": esc["Días analizados"],
+                    },
+                    carrito_file=carrito_path,
+                )
+
+                metrics = _pedido_metrics(res)
+                resultados.append({
+                    "Escenario": esc["nombre"],
                     "Semanas objetivo": esc["Semanas objetivo"],
-                    "Tiempo de reposición": esc["Tiempo de reposición"],
+                    "Reposición": esc["Tiempo de reposición"],
                     "Días analizados": esc["Días analizados"],
-                },
-                carrito_file=carrito_path,
-            )
+                    "Productos en pedido": metrics["productos_en_pedido"],
+                    "Packs sugeridos": metrics["packs_sugeridos"],
+                    "Valor pedido": int(metrics["valor_pedido"]),
+                    "Valor stock": int(metrics["valor_stock"]),
+                })
 
-            metrics = _pedido_metrics(res)
-            resultados.append({
-                "Escenario": esc["nombre"],
-                "Semanas objetivo": esc["Semanas objetivo"],
-                "Reposición": esc["Tiempo de reposición"],
-                "Días analizados": esc["Días analizados"],
-                "Productos en pedido": metrics["productos_en_pedido"],
-                "Packs sugeridos": metrics["packs_sugeridos"],
-                "Valor pedido": int(metrics["valor_pedido"]),
-                "Valor stock": int(metrics["valor_stock"]),
-            })
-
-            tmp_pedido = res["pedido"].copy()
-            tmp_pedido["Escenario"] = esc["nombre"]
-            pedidos_por_escenario[esc["nombre"]] = tmp_pedido
+                tmp_pedido = res["pedido"].copy()
+                tmp_pedido["Escenario"] = esc["nombre"]
+                pedidos_por_escenario[esc["nombre"]] = tmp_pedido
 
     resumen = pd.DataFrame(resultados)
 
@@ -430,21 +432,14 @@ def render_simulador_parametros(paths, maestro_path, carrito_path, base_params, 
 
     for idx, row in resumen.iterrows():
         with [col_a, col_b, col_c][idx]:
-            st.metric(
-                row["Escenario"],
-                formato_moneda_ar(row["Valor pedido"]),
-                formato_moneda_ar(row["Dif. valor pedido vs Actual"])
-            )
+            st.metric(row["Escenario"], formato_moneda_ar(row["Valor pedido"]), formato_moneda_ar(row["Dif. valor pedido vs Actual"]))
             st.caption(f"Packs: {int(row['Packs sugeridos'])} ({int(row['Dif. packs vs Actual']):+d} vs Actual)")
 
     st.subheader("Productos que más cambian")
 
     try:
         base_pedido = pedidos_por_escenario[base_nombre][["Producto", "Packs a Comprar", "Valor Pedido Sugerido"]].copy()
-        base_pedido = base_pedido.rename(columns={
-            "Packs a Comprar": "Packs Actual",
-            "Valor Pedido Sugerido": "Valor Actual",
-        })
+        base_pedido = base_pedido.rename(columns={"Packs a Comprar": "Packs Actual", "Valor Pedido Sugerido": "Valor Actual"})
 
         comparaciones = []
 
@@ -453,10 +448,7 @@ def render_simulador_parametros(paths, maestro_path, carrito_path, base_params, 
                 continue
 
             p = pedido_esc[["Producto", "Packs a Comprar", "Valor Pedido Sugerido"]].copy()
-            p = p.rename(columns={
-                "Packs a Comprar": f"Packs {esc_nombre}",
-                "Valor Pedido Sugerido": f"Valor {esc_nombre}",
-            })
+            p = p.rename(columns={"Packs a Comprar": f"Packs {esc_nombre}", "Valor Pedido Sugerido": f"Valor {esc_nombre}"})
 
             merged = base_pedido.merge(p, on="Producto", how="outer").fillna(0)
             merged["Escenario comparado"] = esc_nombre
@@ -470,15 +462,7 @@ def render_simulador_parametros(paths, maestro_path, carrito_path, base_params, 
             cambios["Abs dif valor"] = cambios["Dif. valor"].abs()
             cambios = cambios.sort_values("Abs dif valor", ascending=False).head(30)
 
-            cambios_mostrar = cambios[[
-                "Escenario comparado",
-                "Producto",
-                "Packs Actual",
-                "Dif. packs",
-                "Valor Actual",
-                "Dif. valor",
-            ]].copy()
-
+            cambios_mostrar = cambios[["Escenario comparado", "Producto", "Packs Actual", "Dif. packs", "Valor Actual", "Dif. valor"]].copy()
             cambios_mostrar["Valor Actual"] = cambios_mostrar["Valor Actual"].apply(formato_moneda_ar)
             cambios_mostrar["Dif. valor"] = cambios_mostrar["Dif. valor"].apply(formato_moneda_ar)
 
@@ -486,10 +470,13 @@ def render_simulador_parametros(paths, maestro_path, carrito_path, base_params, 
     except Exception as e:
         st.warning(f"No pude calcular el detalle de cambios por producto: {e}")
 
-
 def render_generar_pedido(github):
     st.header("Generar pedido")
     st.caption("Subí Stock, Sabores y Power BI. El Maestro y el Carrito vigentes se toman automáticamente.")
+
+    if "ultimo_analisis_snapshot" in st.session_state:
+        with st.expander("Simulador del último análisis", expanded=True):
+            render_simulador_parametros(st.session_state["ultimo_analisis_snapshot"])
     col1, col2, col3 = st.columns(3)
     with col1:
         stock_file = st.file_uploader("1. Archivo de STOCK", type=["csv"])
@@ -618,17 +605,20 @@ def render_generar_pedido(github):
                 st.success("Pedido analizado correctamente.")
                 render_diagnostico_pedido(result)
 
-                render_simulador_parametros(
-                    paths=paths,
-                    maestro_path=maestro_path,
-                    carrito_path=carrito_path,
-                    base_params={
+                st.session_state["ultimo_analisis_snapshot"] = {
+                    "stock_bytes": stock_file.getvalue(),
+                    "sabores_bytes": sabores_file.getvalue(),
+                    "data_bytes": data_file.getvalue(),
+                    "maestro_bytes": maestro_path.read_bytes(),
+                    "carrito_bytes": carrito_path.read_bytes(),
+                    "base_params": {
                         "Semanas objetivo": semanas_objetivo,
                         "Tiempo de reposición": tiempo_reposicion,
                         "Días analizados": dias_analizados,
                     },
-                    tmp=tmp,
-                )
+                }
+
+                render_simulador_parametros(st.session_state["ultimo_analisis_snapshot"])
 
                 st.markdown("---")
                 st.header("Resumen final")

@@ -2,24 +2,15 @@
 
 ## Versión
 
-Labs 2.1.0
+Labs 2.1.1
 
-## Objetivo
+## Corrección
 
-Agregar simulador de parámetros sobre los mismos archivos cargados.
-
-## Funcionalidad nueva
-
-Después de analizar y generar el pedido:
-
-- Permite comparar 3 escenarios.
-- Cambia semanas objetivo, reposición y días analizados.
-- Muestra valor del pedido por escenario.
-- Muestra packs sugeridos por escenario.
-- Calcula diferencia contra el escenario Actual.
-- Lista productos que más cambian.
+- Corrige el botón SIMULAR ESCENARIOS.
+- El simulador ahora usa `session_state` y conserva el último análisis.
+- Al tocar SIMULAR ESCENARIOS, la app puede recalcular los escenarios aunque Streamlit haga rerun.
 
 ## Base
 
-Deriva de Labs 2.0.0.
+Deriva de Labs 2.1.0.
 No modifica producción.
