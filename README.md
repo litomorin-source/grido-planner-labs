@@ -2,12 +2,15 @@
 
 ## Versión
 
-0.8.1
+0.8.2
 
 ## Cambios
 
-- Corrige validación demasiado permisiva de Maestro y Carrito.
-- Maestro ahora exige hojas, columnas y cantidad mínima de datos reales.
-- Carrito ahora exige varios códigos válidos en columna B, precios positivos en columna I y descripción.
+- Corrige validación de Carrito.
+- Carrito valida según el criterio real del motor:
+  - códigos en columna B,
+  - precios en columna I,
+  - acepta precios numéricos o formato argentino,
+  - no exige descripción fija.
+- Mantiene validación reforzada del Maestro.
 - Mantiene modo Usuario / Administrador con PIN.
-- Sin tutorial por ahora.

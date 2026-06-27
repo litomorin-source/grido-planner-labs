@@ -134,6 +134,49 @@ def validar_maestro(maestro_path):
     return len(errores) == 0, errores, advertencias
 
 
+def _parse_price_ar(value):
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    s = str(value).strip()
+    if not s:
+        return None
+
+    s = s.replace("$", "").replace(" ", "")
+
+    try:
+        if "," in s:
+            # Formato argentino: 42.000,50
+            s2 = s.replace(".", "").replace(",", ".")
+            return float(s2)
+        return float(s)
+    except Exception:
+        return None
+
+
+def _codigo_ok(value):
+    if value is None:
+        return False
+
+    s = str(value).strip()
+    if not s:
+        return False
+
+    try:
+        # Acepta 4000147, 4000147.0, etc.
+        n = int(float(s))
+        return n > 0
+    except Exception:
+        # Acepta códigos alfanuméricos no vacíos si existieran.
+        return len(s) >= 3
+
+
 def validar_carrito(carrito_path):
     errores = []
     advertencias = []
@@ -149,65 +192,53 @@ def validar_carrito(carrito_path):
 
     ws = wb[wb.sheetnames[0]]
 
-    if ws.max_row < 5:
-        errores.append("El carrito no tiene datos suficientes.")
     if ws.max_column < 9:
-        errores.append("El carrito debe tener al menos 9 columnas. Se espera código en columna B y precio en columna I.")
-
-    if errores:
         wb.close()
-        return False, errores, advertencias
+        return False, ["El carrito debe tener al menos 9 columnas. Se espera código en columna B y precio en columna I."], []
 
     codigos_validos = 0
     precios_validos = 0
-    filas_validas = 0
+    pares_validos = 0
+    filas_con_datos = 0
 
-    for row in ws.iter_rows(min_row=2, values_only=True):
+    # Se escanean todas las filas porque el archivo real puede tener encabezados/espacios arriba.
+    for row in ws.iter_rows(values_only=True):
+        tiene_datos = any(cell is not None and str(cell).strip() != "" for cell in row)
+        if tiene_datos:
+            filas_con_datos += 1
+
         codigo = row[1] if len(row) >= 2 else None
-        descripcion = row[2] if len(row) >= 3 else None
         precio = row[8] if len(row) >= 9 else None
 
-        codigo_txt = _cell_text(codigo)
-        descripcion_txt = _cell_text(descripcion)
+        codigo_valido = _codigo_ok(codigo)
+        precio_parseado = _parse_price_ar(precio)
+        precio_valido = precio_parseado is not None and precio_parseado > 0
 
-        # Código esperado: numérico o casi numérico, no texto libre.
-        codigo_ok = False
-        if codigo_txt:
-            try:
-                codigo_float = float(codigo_txt)
-                if codigo_float > 1000:
-                    codigo_ok = True
-            except Exception:
-                if codigo_txt.isdigit() and len(codigo_txt) >= 4:
-                    codigo_ok = True
-
-        precio_ok = False
-        try:
-            if precio is not None and _cell_text(precio) != "" and float(precio) > 0:
-                precio_ok = True
-        except Exception:
-            pass
-
-        if codigo_ok:
+        if codigo_valido:
             codigos_validos += 1
 
-        if precio_ok:
+        if precio_valido:
             precios_validos += 1
 
-        if codigo_ok and precio_ok and descripcion_txt:
-            filas_validas += 1
+        if codigo_valido and precio_valido:
+            pares_validos += 1
 
-    if codigos_validos < 5:
-        errores.append("No encontré suficientes códigos válidos en la columna B.")
+    if filas_con_datos == 0:
+        errores.append("El carrito no contiene filas con datos.")
 
-    if precios_validos < 5:
-        errores.append("No encontré suficientes precios numéricos válidos en la columna I.")
+    if codigos_validos == 0:
+        errores.append("No encontré códigos válidos en la columna B.")
 
-    if filas_validas < 5:
-        errores.append("El archivo no parece ser el Modelo de Carrito real: faltan filas con código, descripción y precio.")
+    if precios_validos == 0:
+        errores.append("No encontré precios numéricos válidos en la columna I.")
 
-    if codigos_validos != precios_validos:
-        advertencias.append(f"Códigos válidos: {codigos_validos}. Precios válidos: {precios_validos}. Revisar filas incompletas.")
+    if pares_validos == 0:
+        errores.append("No encontré ninguna fila con código en columna B y precio en columna I.")
+
+    if pares_validos > 0:
+        advertencias.append(f"Filas válidas con código y precio: {pares_validos}.")
+        advertencias.append(f"Códigos detectados en columna B: {codigos_validos}.")
+        advertencias.append(f"Precios detectados en columna I: {precios_validos}.")
 
     wb.close()
     return len(errores) == 0, errores, advertencias
