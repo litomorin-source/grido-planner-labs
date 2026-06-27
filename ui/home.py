@@ -189,7 +189,7 @@ def subir_archivo_validado(label, uploader_label, destino, validator, filename, 
 
 def render_generar_pedido(github):
     st.header("Generar pedido")
-    st.caption("Maestro y Carrito se descargan desde GitHub. Solo subís Stock, Sabores y Power BI.")
+    st.caption("Subí Stock, Sabores y Power BI. El Maestro y el Carrito vigentes se toman automáticamente.")
     col1, col2, col3 = st.columns(3)
     with col1:
         stock_file = st.file_uploader("1. Archivo de STOCK", type=["csv"])
@@ -213,10 +213,10 @@ def render_generar_pedido(github):
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp = Path(tmp_dir)
         paths = {}
-        with st.spinner("Descargando Maestro y Carrito desde GitHub..."):
+        with st.spinner("Cargando Maestro y Carrito vigentes..."):
             base_ok, base_msg, maestro_path, carrito_path = descargar_base_github(github, tmp)
         if base_ok:
-            st.success("✅ Maestro y Carrito desde GitHub OK")
+            st.success("✅ Maestro y Carrito vigentes OK")
         else:
             st.error(base_msg)
             st.stop()
@@ -380,37 +380,63 @@ def render_actualizar_archivos(github):
     )
 
 
+ADMIN_PIN = "2468"
+
 def render_home():
-    st.title("🍦 GridoPlanner Labs")
+    st.title("🍦 GridoPlanner")
     st.caption(APP_VERSION)
+
+    modo = st.sidebar.radio("Modo", ["Usuario", "Administrador"])
+    st.sidebar.markdown("---")
+    st.sidebar.info(f"Versión {APP_VERSION}")
+
     config = get_github_config()
-    status_line(config["ok"], "Secrets encontrados")
+
     if not config["ok"]:
-        st.warning("Faltan estos Secrets:")
+        st.error("Faltan Secrets de GitHub.")
         for item in config["missing"]:
             st.code(item)
         st.stop()
+
     github = GitHubSync(config["token"], config["repo"], config["branch"])
+
+    if modo == "Usuario":
+        render_generar_pedido(github)
+        return
+
+    st.header("Administrador")
+    pin = st.text_input("PIN de administrador", type="password")
+
+    if pin != ADMIN_PIN:
+        st.warning("Ingresá el PIN correcto para administrar archivos.")
+        st.stop()
+
+    st.success("PIN correcto.")
+
     with st.expander("Estado GitHub", expanded=False):
         st.write("Repositorio:")
         st.code(config["repo"])
         st.write("Rama:")
         st.code(config["branch"])
+
         if st.button("Probar conexión GitHub", use_container_width=True):
             with st.spinner("Conectando..."):
                 result = github.verify()
+
             repo = result.get("repo")
             branch = result.get("branch")
+
             status_line(repo["ok"], "Repositorio accesible", repo.get("message", ""))
             if branch:
                 status_line(branch["ok"], "Rama encontrada", branch.get("message", ""))
                 if branch.get("ok"):
                     st.write("Último commit:")
                     st.code(branch.get("commit_sha"))
-    tab1, tab2, tab3 = st.tabs(["Generar pedido", "Centro de Datos", "Actualizar archivos"])
+
+    tab1, tab2 = st.tabs(["Centro de Datos", "Actualizar archivos"])
+
     with tab1:
-        render_generar_pedido(github)
-    with tab2:
         render_centro_datos(github)
-    with tab3:
+
+    with tab2:
         render_actualizar_archivos(github)
