@@ -2,15 +2,20 @@
 
 ## Versión
 
-0.8.2
+0.8.3
 
 ## Cambios
 
-- Corrige validación de Carrito.
-- Carrito valida según el criterio real del motor:
-  - códigos en columna B,
-  - precios en columna I,
-  - acepta precios numéricos o formato argentino,
-  - no exige descripción fija.
-- Mantiene validación reforzada del Maestro.
-- Mantiene modo Usuario / Administrador con PIN.
+- Ajusta validación de Carrito.
+- Ahora valida la estructura real del Modelo de Carrito:
+  - GrupoProducto
+  - Codigo
+  - Cantidad
+  - Deposito
+  - Descripcion
+  - Cubicaje
+  - Peso
+  - impuestoIva
+  - precio
+  - Disponible
+- Evita falsos positivos como archivos de rentabilidad u otros Excel con números en columnas B/I.
