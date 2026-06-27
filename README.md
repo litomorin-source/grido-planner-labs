@@ -1,21 +1,29 @@
-# GridoPlanner - Preproducción
+# GridoPlanner Labs
 
 ## Versión
 
-0.8.3
+Labs 2.0.0
 
-## Cambios
+## Objetivo
 
-- Ajusta validación de Carrito.
-- Ahora valida la estructura real del Modelo de Carrito:
-  - GrupoProducto
-  - Codigo
-  - Cantidad
-  - Deposito
-  - Descripcion
-  - Cubicaje
-  - Peso
-  - impuestoIva
-  - precio
-  - Disponible
-- Evita falsos positivos como archivos de rentabilidad u otros Excel con números en columnas B/I.
+Agregar diagnóstico previo del pedido antes de descargar el Excel final.
+
+## Funcionalidad nueva
+
+Después de cargar Stock, Sabores y Power BI:
+
+- Analiza el pedido.
+- Muestra métricas principales.
+- Muestra valor de pedido y valor de stock.
+- Detecta stock negativo.
+- Detecta productos sin clasificar.
+- Detecta posibles faltantes.
+- Detecta ventas sin stock.
+- Detecta stock sin ventas.
+- Muestra Top 20 por reposición sugerida.
+- Muestra Top 20 menor cobertura.
+
+## Base
+
+Deriva de Stable 1.9.0.
+No modifica producción.

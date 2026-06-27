@@ -1,1 +1,1 @@
-APP_VERSION = "Preproducción 0.8.3"
+APP_VERSION = "Labs 2.0.0"

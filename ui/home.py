@@ -187,6 +187,119 @@ def subir_archivo_validado(label, uploader_label, destino, validator, filename, 
                 st.code(result.get("details", ""))
 
 
+def _ventas_col(pedido):
+    for col in pedido.columns:
+        if str(col).startswith("Ventas "):
+            return col
+    return None
+
+
+def render_diagnostico_pedido(result):
+    pedido = result["pedido"].copy()
+    sin_clasificar = result.get("sin_clasificar")
+    posibles_faltantes = result.get("posibles_faltantes")
+    stock_negativo = result.get("stock_negativo")
+    ventas_col = _ventas_col(pedido)
+
+    st.markdown("---")
+    st.header("Diagnóstico previo del pedido")
+
+    total_packs = int(pd.to_numeric(pedido.get("Packs a Comprar", 0), errors="coerce").fillna(0).sum())
+    valor_stock_total = result.get("valor_stock_total", 0)
+    valor_pedido_total = result.get("valor_pedido_total", 0)
+
+    ventas_sin_stock = pedido.iloc[0:0].copy()
+    stock_sin_ventas = pedido.iloc[0:0].copy()
+
+    if ventas_col:
+        ventas_num = pd.to_numeric(pedido[ventas_col], errors="coerce").fillna(0)
+        stock_num = pd.to_numeric(pedido["Stock"], errors="coerce").fillna(0)
+        ventas_sin_stock = pedido[(ventas_num > 0) & (stock_num <= 0)].copy()
+        stock_sin_ventas = pedido[(stock_num > 0) & (ventas_num == 0)].copy()
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Productos detectados", len(pedido))
+    m2.metric("Packs sugeridos", total_packs)
+    m3.metric("Valor pedido", formato_moneda_ar(valor_pedido_total))
+    m4.metric("Valor stock", formato_moneda_ar(valor_stock_total))
+
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Stock negativo", len(stock_negativo) if stock_negativo is not None else 0)
+    a2.metric("Sin clasificar", len(sin_clasificar) if sin_clasificar is not None else 0)
+    a3.metric("Posibles faltantes", len(posibles_faltantes) if posibles_faltantes is not None else 0)
+    a4.metric("Ventas sin stock", len(ventas_sin_stock))
+
+    if valor_pedido_total and valor_stock_total:
+        relacion = float(valor_pedido_total) / max(float(valor_stock_total), 1)
+        if relacion > 1:
+            st.warning(f"El pedido sugerido supera el valor del stock actual. Relación pedido/stock: {relacion:.2f}. Revisar período y parámetros.")
+        elif relacion > 0.6:
+            st.info(f"El pedido sugerido representa {relacion:.2f} del valor del stock actual.")
+
+    if stock_negativo is not None and len(stock_negativo) > 0:
+        st.error("Hay stock negativo. Revisar inventario o descarga antes de confirmar el pedido.")
+
+    if sin_clasificar is not None and len(sin_clasificar) > 0:
+        st.warning("Hay productos sin clasificar. Puede faltar actualizar el Maestro.")
+
+    if posibles_faltantes is not None and len(posibles_faltantes) > 0:
+        st.warning("Hay posibles faltantes: productos sin ventas y con stock bajo.")
+
+    tabs = st.tabs(["Top reposición", "Menor cobertura", "Ventas sin stock", "Stock sin ventas", "Alertas"])
+
+    with tabs[0]:
+        top_repo = pedido.copy()
+        top_repo["__packs"] = pd.to_numeric(top_repo.get("Packs a Comprar", 0), errors="coerce").fillna(0)
+        top_repo = top_repo.sort_values("__packs", ascending=False).head(20)
+        cols = ["Grupo", "Producto", "Stock", ventas_col, "Venta Semanal", "Semanas Stock", "Packs a Comprar", "Valor Pedido Sugerido", "Código Compra", "Producto Compra"]
+        cols = [c for c in cols if c and c in top_repo.columns]
+        st.dataframe(top_repo[cols], use_container_width=True)
+
+    with tabs[1]:
+        cobertura = pedido.copy()
+        cobertura["__semanas"] = pd.to_numeric(cobertura.get("Semanas Stock", None), errors="coerce")
+        cobertura = cobertura[cobertura["__semanas"].notna()].sort_values("__semanas", ascending=True).head(20)
+        cols = ["Grupo", "Producto", "Stock", ventas_col, "Venta Semanal", "Semanas Stock", "Packs a Comprar", "Valor Pedido Sugerido"]
+        cols = [c for c in cols if c and c in cobertura.columns]
+        st.dataframe(cobertura[cols], use_container_width=True)
+
+    with tabs[2]:
+        if len(ventas_sin_stock) == 0:
+            st.success("No se detectaron productos con ventas y stock cero/negativo.")
+        else:
+            cols = ["Grupo", "Producto", "Stock", ventas_col, "Venta Semanal", "Packs a Comprar", "Código Compra", "Producto Compra"]
+            cols = [c for c in cols if c and c in ventas_sin_stock.columns]
+            st.dataframe(ventas_sin_stock[cols], use_container_width=True)
+
+    with tabs[3]:
+        if len(stock_sin_ventas) == 0:
+            st.success("No se detectaron productos con stock y ventas cero.")
+        else:
+            cols = ["Grupo", "Producto", "Stock", ventas_col, "Semanas Stock", "Observación", "Código Compra", "Producto Compra"]
+            cols = [c for c in cols if c and c in stock_sin_ventas.columns]
+            st.dataframe(stock_sin_ventas[cols].head(100), use_container_width=True)
+
+    with tabs[4]:
+        hay_alertas = False
+        if stock_negativo is not None and len(stock_negativo) > 0:
+            hay_alertas = True
+            with st.expander("Stock negativo", expanded=True):
+                st.dataframe(stock_negativo, use_container_width=True)
+
+        if posibles_faltantes is not None and len(posibles_faltantes) > 0:
+            hay_alertas = True
+            with st.expander("Posibles faltantes", expanded=True):
+                st.dataframe(posibles_faltantes, use_container_width=True)
+
+        if sin_clasificar is not None and len(sin_clasificar) > 0:
+            hay_alertas = True
+            with st.expander("Sin clasificar", expanded=True):
+                st.dataframe(sin_clasificar, use_container_width=True)
+
+        if not hay_alertas:
+            st.success("No se detectaron alertas principales.")
+
+
 def render_generar_pedido(github):
     st.header("Generar pedido")
     st.caption("Subí Stock, Sabores y Power BI. El Maestro y el Carrito vigentes se toman automáticamente.")
@@ -295,7 +408,7 @@ def render_generar_pedido(github):
             st.stop()
 
         st.success("✅ Todo listo para generar el pedido.")
-        if st.button("GENERAR PEDIDO", type="primary", use_container_width=True):
+        if st.button("ANALIZAR Y GENERAR PEDIDO", type="primary", use_container_width=True):
             output = tmp / "Pedido_Final.xlsx"
             try:
                 result = procesar_archivos(
@@ -315,7 +428,11 @@ def render_generar_pedido(github):
                 sin_clasificar = result["sin_clasificar"]
                 posibles_faltantes = result.get("posibles_faltantes")
                 stock_negativo = result.get("stock_negativo")
-                st.success("Pedido generado correctamente.")
+                st.success("Pedido analizado correctamente.")
+                render_diagnostico_pedido(result)
+
+                st.markdown("---")
+                st.header("Resumen final")
                 m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Productos en pedido", len(pedido))
                 m2.metric("Stock negativo", len(stock_negativo) if stock_negativo is not None else 0)
@@ -383,7 +500,7 @@ def render_actualizar_archivos(github):
 ADMIN_PIN = "2468"
 
 def render_home():
-    st.title("🍦 GridoPlanner")
+    st.title("🍦 GridoPlanner Labs")
     st.caption(APP_VERSION)
 
     modo = st.sidebar.radio("Modo", ["Usuario", "Administrador"])
