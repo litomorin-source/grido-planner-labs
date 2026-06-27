@@ -124,6 +124,71 @@ class GitHubSync:
             "content_bytes": content_bytes,
         }
 
+
+    def list_commits_for_path(self, path: str, per_page: int = 10):
+        url = f"{self.api_base}/repos/{self.repo}/commits"
+        r = requests.get(
+            url,
+            headers=self.headers,
+            params={"sha": self.branch, "path": path, "per_page": per_page},
+            timeout=20,
+        )
+
+        if r.status_code != 200:
+            return {
+                "ok": False,
+                "message": f"No pude consultar historial. Status {r.status_code}",
+                "details": r.text[:800],
+            }
+
+        commits = []
+        for c in r.json():
+            commit = c.get("commit", {})
+            author = commit.get("author", {}) or {}
+            commits.append({
+                "sha": c.get("sha"),
+                "short_sha": (c.get("sha") or "")[:7],
+                "html_url": c.get("html_url"),
+                "message": commit.get("message"),
+                "author_name": author.get("name"),
+                "author_date": author.get("date"),
+            })
+
+        return {"ok": True, "commits": commits}
+
+    def download_file_bytes_at_ref(self, path: str, ref: str):
+        url = f"{self.api_base}/repos/{self.repo}/contents/{path}"
+        r = requests.get(url, headers=self.headers, params={"ref": ref}, timeout=30)
+
+        if r.status_code == 404:
+            return {"ok": False, "message": f"Archivo no encontrado en esa versión: {path}"}
+
+        if r.status_code != 200:
+            return {
+                "ok": False,
+                "message": f"No pude descargar archivo histórico. Status {r.status_code}",
+                "details": r.text[:800],
+            }
+
+        data = r.json()
+        encoded = data.get("content")
+        if not encoded:
+            return {"ok": False, "message": "GitHub no devolvió contenido para descargar."}
+
+        try:
+            content_bytes = base64.b64decode(encoded)
+        except Exception as e:
+            return {"ok": False, "message": f"No pude decodificar el archivo histórico. Error: {e}"}
+
+        return {
+            "ok": True,
+            "path": path,
+            "name": data.get("name"),
+            "size": data.get("size"),
+            "sha": data.get("sha"),
+            "content_bytes": content_bytes,
+        }
+
     def _get_existing_sha(self, path: str):
         url = f"{self.api_base}/repos/{self.repo}/contents/{path}"
         r = requests.get(url, headers=self.headers, params={"ref": self.branch}, timeout=20)

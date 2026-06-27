@@ -743,27 +743,166 @@ def render_generar_pedido(github):
                 st.exception(e)
 
 
+
+def render_historial_maestro(github):
+    st.subheader("Historial del Maestro")
+    st.caption(f"Archivo: `{MAESTRO_GITHUB_PATH}`")
+
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        cantidad = st.number_input("Cantidad de versiones a mostrar", min_value=3, max_value=30, value=10, step=1)
+    with col_b:
+        st.write("")
+        st.write("")
+        consultar = st.button("Consultar historial", use_container_width=True)
+
+    if consultar or "historial_maestro" not in st.session_state:
+        with st.spinner("Consultando historial del Maestro..."):
+            st.session_state["historial_maestro"] = github.list_commits_for_path(MAESTRO_GITHUB_PATH, per_page=int(cantidad))
+
+    historial = st.session_state.get("historial_maestro")
+
+    if not historial:
+        return
+
+    if not historial.get("ok"):
+        st.error(historial.get("message"))
+        st.code(historial.get("details", ""))
+        return
+
+    commits = historial.get("commits", [])
+
+    if not commits:
+        st.warning("No encontré historial para el Maestro.")
+        return
+
+    st.info("Restaurar una versión anterior no borra historia: crea un commit nuevo con esa versión como Maestro vigente.")
+
+    for idx, c in enumerate(commits):
+        titulo = f"{idx + 1}. {c.get('author_date', '-') } — {c.get('short_sha', '-')}"
+        with st.expander(titulo, expanded=(idx == 0)):
+            st.write("Mensaje:")
+            st.code(c.get("message") or "-")
+            st.caption(f"Autor: {c.get('author_name') or '-'}")
+            if c.get("html_url"):
+                st.link_button("Ver commit en GitHub", c["html_url"], use_container_width=True)
+
+            if idx == 0:
+                st.success("Esta es la versión actual.")
+                continue
+
+            st.markdown("---")
+            st.warning("Restaurar esta versión reemplazará el Maestro vigente por el archivo de este commit.")
+
+            confirmar = st.checkbox(
+                f"Confirmo que quiero habilitar restauración de {c.get('short_sha')}",
+                key=f"confirm_restore_{c.get('sha')}",
+                value=False,
+            )
+
+            if st.button(
+                f"Restaurar versión {c.get('short_sha')}",
+                key=f"restore_{c.get('sha')}",
+                disabled=not confirmar,
+                use_container_width=True,
+            ):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    tmp = Path(tmp_dir)
+
+                    with st.spinner("Descargando versión histórica..."):
+                        historico = github.download_file_bytes_at_ref(MAESTRO_GITHUB_PATH, c["sha"])
+
+                    if not historico.get("ok"):
+                        st.error(historico.get("message"))
+                        st.code(historico.get("details", ""))
+                        return
+
+                    historico_path = tmp / "Maestro_Historico.xlsx"
+                    historico_path.write_bytes(historico["content_bytes"])
+
+                    ok, errores, _ = validar_maestro(historico_path)
+
+                    if not ok:
+                        st.error("La versión histórica no pasó validación. No se restaura.")
+                        for err in errores:
+                            st.error(err)
+                        return
+
+                    actual = github.download_file_bytes(MAESTRO_GITHUB_PATH)
+                    if actual.get("ok"):
+                        actual_path = tmp / "Maestro_Actual.xlsx"
+                        actual_path.write_bytes(actual["content_bytes"])
+                        try:
+                            diff = comparar_maestros(actual_path, historico_path)
+                            resumen = diff["resumen"]
+
+                            st.subheader("Diferencias contra versión actual")
+                            d1, d2, d3, d4, d5 = st.columns(5)
+                            d1.metric("Productos actual", resumen["productos_actual"])
+                            d2.metric("Productos restaurado", resumen["productos_nuevo"])
+                            d3.metric("Agregados", resumen["agregados"])
+                            d4.metric("Eliminados", resumen["eliminados"])
+                            d5.metric("Cambios", resumen["cambios"])
+
+                            with st.expander("Ver cambios de restauración", expanded=False):
+                                tab_a, tab_b, tab_c = st.tabs(["Agregados", "Eliminados", "Cambios"])
+                                with tab_a:
+                                    st.dataframe(diff["agregados"], use_container_width=True)
+                                with tab_b:
+                                    st.dataframe(diff["eliminados"], use_container_width=True)
+                                with tab_c:
+                                    st.dataframe(diff["cambios"], use_container_width=True)
+                        except Exception as e:
+                            st.warning(f"No pude comparar antes de restaurar: {e}")
+
+                    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+                    commit_message = f"Labs 2.3.0 - restaurar Maestro a {c.get('short_sha')} ({timestamp})"
+
+                    with st.spinner("Restaurando Maestro en GitHub..."):
+                        result = github.upload_bytes_file(
+                            path=MAESTRO_GITHUB_PATH,
+                            content_bytes=historico["content_bytes"],
+                            commit_message=commit_message,
+                        )
+
+                    if result.get("ok"):
+                        st.success("Maestro restaurado correctamente.")
+                        st.write("Nuevo commit:")
+                        st.code(result.get("commit"))
+                        st.session_state.pop("data_status", None)
+                        st.session_state.pop("historial_maestro", None)
+                        if result.get("html_url"):
+                            st.link_button("Ver nuevo commit", result["html_url"], use_container_width=True)
+                    else:
+                        st.error(result.get("message"))
+                        st.code(result.get("details", ""))
+
+
 def render_actualizar_archivos(github):
-    subir_archivo_validado(
-        label="Maestro",
-        uploader_label="Subir Maestro_Productos_Grido.xlsx",
-        destino=MAESTRO_GITHUB_PATH,
-        validator=validar_maestro,
-        filename="Maestro_Productos_Grido.xlsx",
-        github=github,
-    )
-    st.markdown("---")
-    subir_archivo_validado(
-        label="Carrito",
-        uploader_label="Subir Modelo_de_Carrito.xlsx",
-        destino=CARRITO_GITHUB_PATH,
-        validator=validar_carrito,
-        filename="Modelo_de_Carrito.xlsx",
-        github=github,
-    )
+    tab_maestro, tab_carrito, tab_historial = st.tabs(["Actualizar Maestro", "Actualizar Carrito", "Historial Maestro"])
 
+    with tab_maestro:
+        subir_archivo_validado(
+            label="Maestro",
+            uploader_label="Subir Maestro_Productos_Grido.xlsx",
+            destino=MAESTRO_GITHUB_PATH,
+            validator=validar_maestro,
+            filename="Maestro_Productos_Grido.xlsx",
+            github=github,
+        )
 
-ADMIN_PIN = "2468"
+    with tab_carrito:
+        subir_archivo_validado(
+            label="Carrito",
+            uploader_label="Subir Modelo_de_Carrito.xlsx",
+            destino=CARRITO_GITHUB_PATH,
+            validator=validar_carrito,
+            filename="Modelo_de_Carrito.xlsx",
+            github=github,
+        )
+
+    with tab_historial:
+        render_historial_maestro(github)
 
 def render_home():
     st.title("🍦 GridoPlanner Labs")

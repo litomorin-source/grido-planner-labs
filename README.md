@@ -2,31 +2,27 @@
 
 ## Versión
 
-Labs 2.2.0
+Labs 2.3.0
 
 ## Objetivo
 
-Agregar control de cambios del Maestro antes de guardarlo en GitHub.
+Agregar historial y restauración del Maestro.
 
 ## Funcionalidad nueva
 
-Cuando el administrador sube un Maestro nuevo:
+En Administrador → Actualizar archivos → Historial Maestro:
 
-- Se valida estructura.
-- Se descarga el Maestro vigente desde GitHub.
-- Se comparan productos.
-- Se muestran:
-  - productos agregados,
-  - productos eliminados,
-  - cambios en código de compra,
-  - cambios en producto compra,
-  - cambios en compra mínima,
-  - cambios en activo,
-  - cambios en excluir,
-  - cambios en tipo producto.
-- Si hay productos eliminados, exige confirmación explícita antes de guardar.
+- Consulta últimos commits de `data/Maestro_Productos_Grido.xlsx`.
+- Muestra fecha, mensaje, autor y SHA corto.
+- Permite ver el commit en GitHub.
+- Permite restaurar una versión anterior.
+- Antes de restaurar:
+  - descarga la versión histórica,
+  - valida el Maestro,
+  - compara contra la versión actual.
+- La restauración crea un nuevo commit. No borra historial.
 
 ## Base
 
-Deriva de Labs 2.1.1.
+Deriva de Labs 2.2.0.
 No modifica producción.
