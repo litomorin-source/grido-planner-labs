@@ -19,6 +19,9 @@ from motor import (
     validar_data,
 )
 
+
+ADMIN_PIN = "2468"
+
 MAESTRO_GITHUB_PATH = "data/Maestro_Productos_Grido.xlsx"
 CARRITO_GITHUB_PATH = "data/Modelo_de_Carrito.xlsx"
 
