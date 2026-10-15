@@ -466,7 +466,7 @@ def render_simulador_parametros(snapshot, key_prefix="sim"):
             c_rep = st.number_input("Reposición C", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key=f"{key_prefix}_c_rep")
             c_dias = st.number_input("Días C", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key=f"{key_prefix}_c_dias")
 
-    if not st.button("SIMULAR ESCENARIOS", use_container_width=True):
+    if not st.button("SIMULAR ESCENARIOS", use_container_width=True, key=f"{key_prefix}_button_1"):
         return
 
     escenarios = [
@@ -583,7 +583,6 @@ def render_simulador_parametros(snapshot, key_prefix="sim"):
             st.dataframe(cambios_mostrar, use_container_width=True)
     except Exception as e:
         st.warning(f"No pude calcular el detalle de cambios por producto: {e}")
-
 def render_generar_pedido(github):
     st.header("Generar pedido")
     st.caption("Subí Stock, Sabores y Power BI. El Maestro y el Carrito vigentes se toman automáticamente.")

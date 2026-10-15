@@ -1,9 +1,13 @@
-# GridoPlanner Labs 2.3.6
+# GridoPlanner Labs 2.3.7
 
-Hotfix sobre Labs 2.3.5.
+Hotfix sobre Labs 2.3.6.
 
 Corrección:
-- Soluciona `StreamlitDuplicateElementKey` en el simulador.
-- Cada instancia del simulador usa un namespace de keys distinto.
-- No cambia la lógica del motor.
-- Mantiene compatibilidad con el Mix viejo y con el nuevo formato P1/P2.
+- Soluciona `StreamlitDuplicateElementId` en el simulador.
+- El botón `SIMULAR ESCENARIOS` ahora tiene key única por instancia.
+- Se revisan los botones del simulador para evitar colisiones de IDs.
+
+No cambia:
+- lógica del motor;
+- cálculo de pedidos;
+- compatibilidad con Mix viejo/nuevo P1-P2.
