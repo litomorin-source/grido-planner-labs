@@ -57,6 +57,14 @@ def format_size(size_bytes):
     return f"{size_bytes / (1024 * 1024):.2f} MB"
 
 
+def normalize(value):
+    import unicodedata
+    s = str(value or "").strip().lower()
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = " ".join(s.split())
+    return s
+
+
 def detectar_grupos_powerbi(file_path):
     try:
         df = pd.read_excel(file_path)

@@ -1,13 +1,14 @@
-# GridoPlanner Labs 2.3.2
+# GridoPlanner Labs 2.3.3
 
-Hotfix de compatibilidad con el nuevo Mix de Ventas de SmartFran/Power BI.
+Hotfix sobre Labs 2.3.2.
 
-Cambios:
-- Mantiene compatibilidad con el formato anterior de 16 columnas.
-- Acepta el nuevo formato P1/P2.
-- Para el cálculo del pedido usa SIEMPRE `Cant. acum. P1`.
-- P2 y las columnas comparativas no intervienen en el motor.
-- Se actualiza también la detección de grupos usada por la interfaz.
-- No modifica producción.
+Corrección:
+- Se agrega `normalize()` en `ui/home.py`.
+- Soluciona el error:
+  `name 'normalize' is not defined`
+  al leer los grupos del nuevo Mix de Ventas P1/P2.
 
-Base: Labs 2.3.1.
+Mantiene:
+- compatibilidad con formato viejo;
+- compatibilidad con nuevo formato P1/P2;
+- uso exclusivo de `Cant. acum. P1` para el motor.
