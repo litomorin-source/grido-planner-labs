@@ -616,7 +616,23 @@ def render_generar_pedido(github):
         with st.spinner("Cargando Maestro y Carrito vigentes..."):
             base_ok, base_msg, maestro_path, carrito_path = descargar_base_github(github, tmp)
         if base_ok:
-            st.success("✅ Maestro y Carrito vigentes OK")
+            def _fecha_ultimo_cambio(path):
+                try:
+                    info = github.get_file_info(path)
+                    commit = (info or {}).get("commit") or {}
+                    fecha = commit.get("author_date")
+                    if fecha:
+                        dt = datetime.fromisoformat(str(fecha).replace("Z", "+00:00"))
+                        return dt.strftime("%d/%m/%Y")
+                except Exception:
+                    pass
+                return "sin fecha"
+
+            fecha_maestro = _fecha_ultimo_cambio(MAESTRO_GITHUB_PATH)
+            fecha_carrito = _fecha_ultimo_cambio(CARRITO_GITHUB_PATH)
+
+            st.success(f"✅ Maestro OK · Último cambio: {fecha_maestro}")
+            st.success(f"✅ Carrito OK · Último cambio: {fecha_carrito}")
         else:
             st.error(base_msg)
             st.stop()
@@ -678,7 +694,10 @@ def render_generar_pedido(github):
                     st.metric("Valor stock actual", formato_moneda_ar(result_stock.get("valor_stock_total", 0)))
                     if result_stock.get("categoria") is not None:
                         with st.expander("Ver valorización por categoría", expanded=False):
-                            st.dataframe(result_stock["categoria"], use_container_width=True)
+                            df_categoria = result_stock["categoria"].copy()
+                            if "Valor Stock Actual" in df_categoria.columns:
+                                df_categoria["Valor Stock Actual"] = df_categoria["Valor Stock Actual"].apply(formato_moneda_ar)
+                            st.dataframe(df_categoria, use_container_width=True)
                     st.download_button(
                         "DESCARGAR INFORME COSTO STOCK",
                         data=output_stock.read_bytes(),
@@ -746,7 +765,10 @@ def render_generar_pedido(github):
                 v2.metric("Valor pedido sugerido", formato_moneda_ar(result.get("valor_pedido_total", 0)))
                 if result.get("valorizacion_categoria") is not None:
                     with st.expander("Ver valorización por categoría", expanded=False):
-                        st.dataframe(result["valorizacion_categoria"], use_container_width=True)
+                        df_categoria = result["valorizacion_categoria"].copy()
+                        if "Valor Stock Actual" in df_categoria.columns:
+                            df_categoria["Valor Stock Actual"] = df_categoria["Valor Stock Actual"].apply(formato_moneda_ar)
+                        st.dataframe(df_categoria, use_container_width=True)
                 if result.get("valorizacion_producto") is not None:
                     with st.expander("Ver valorización por producto", expanded=False):
                         st.dataframe(result["valorizacion_producto"], use_container_width=True)
