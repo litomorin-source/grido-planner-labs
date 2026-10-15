@@ -1,14 +1,13 @@
-# GridoPlanner Labs 2.3.4
+# GridoPlanner Labs 2.3.5
 
-Hotfix sobre Labs 2.3.3.
+Hotfix sobre Labs 2.3.4.
 
 Corrección:
-- La normalización usada por la interfaz ahora elimina puntuación igual que el motor.
-- Reconoce correctamente el encabezado `Cant. acum. P1`.
-- Corrige el falso mensaje:
-  `El archivo no coincide con el formato anterior ni con el nuevo formato P1/P2.`
+- Corrige la expresión regular de normalización en la interfaz.
+- `Cant. acum. P1` ahora se normaliza exactamente como `cant acum p1`.
+- Soluciona el falso rechazo del formato nuevo P1/P2 en "Ver detalles de Power BI".
 
 Mantiene:
-- compatibilidad con formato viejo;
-- compatibilidad con formato nuevo P1/P2;
-- uso de `Cant. acum. P1` para el cálculo del pedido.
+- formato viejo compatible;
+- formato nuevo P1/P2 compatible;
+- uso exclusivo de `Cant. acum. P1` para el cálculo.

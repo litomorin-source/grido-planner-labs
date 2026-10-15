@@ -1,1 +1,1 @@
-APP_VERSION = "Labs 2.3.4"
+APP_VERSION = "Labs 2.3.5"

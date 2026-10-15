@@ -63,7 +63,7 @@ def normalize(value):
     s = str(value or "").strip().lower()
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     s = re.sub(r"[^a-z0-9 ]", " ", s)
-    s = re.sub(r"\\s+", " ", s).strip()
+    s = re.sub(r"\s+", " ", s).strip()
     return s
 
 
