@@ -36,6 +36,124 @@ def formato_moneda_ar(valor):
     return f"$ {signo}{entero_txt}"
 
 
+
+def _codigo_clave(valor):
+    if pd.isna(valor):
+        return ""
+    txt = str(valor).strip()
+    if txt.endswith(".0"):
+        txt = txt[:-2]
+    return txt
+
+
+def _limpiar_categoria_carrito(valor):
+    txt = str(valor or "").strip()
+    if "-" in txt:
+        izquierda, derecha = txt.split("-", 1)
+        if izquierda.strip().upper().startswith("H"):
+            txt = derecha.strip()
+    return txt
+
+
+def _composicion_stock_desde_carrito(detalle_stock, carrito_path):
+    """
+    Cruza el stock valorizado con la columna A del Carrito (GrupoProducto).
+
+    Devuelve:
+    - sabores: categorías de sabores separadas (Comunes, Premium, Al Agua, etc.)
+    - general: todas las categorías con stock > 0, agrupando todos los SABORES en una sola porción.
+    """
+    if detalle_stock is None or detalle_stock.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    carrito = pd.read_excel(carrito_path)
+    if carrito.shape[1] < 2:
+        return pd.DataFrame(), pd.DataFrame()
+
+    mapa = carrito.iloc[:, [0, 1]].copy()
+    mapa.columns = ["Categoria Carrito", "Codigo Carrito"]
+    mapa["Codigo Key"] = mapa["Codigo Carrito"].apply(_codigo_clave)
+    mapa["Categoria Carrito"] = mapa["Categoria Carrito"].apply(_limpiar_categoria_carrito)
+    mapa = mapa[mapa["Codigo Key"] != ""].drop_duplicates("Codigo Key")
+
+    detalle = detalle_stock.copy()
+    detalle["Codigo Key"] = detalle["Código Compra"].apply(_codigo_clave)
+    detalle["Stock"] = pd.to_numeric(detalle["Stock"], errors="coerce").fillna(0)
+
+    detalle = detalle.merge(
+        mapa[["Codigo Key", "Categoria Carrito"]],
+        on="Codigo Key",
+        how="left",
+    )
+
+    detalle = detalle[
+        (detalle["Stock"] > 0)
+        & detalle["Categoria Carrito"].notna()
+        & (detalle["Categoria Carrito"].astype(str).str.strip() != "")
+    ].copy()
+
+    if detalle.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    es_sabor = detalle["Categoria Carrito"].str.contains("SABORES", case=False, na=False)
+
+    sabores = (
+        detalle[es_sabor]
+        .groupby("Categoria Carrito", as_index=False)["Stock"]
+        .sum()
+        .rename(columns={"Categoria Carrito": "Categoría"})
+        .sort_values("Stock", ascending=False)
+    )
+
+    general = detalle.copy()
+    general["Categoría"] = general["Categoria Carrito"].where(~es_sabor, "SABORES")
+    general = (
+        general.groupby("Categoría", as_index=False)["Stock"]
+        .sum()
+        .sort_values("Stock", ascending=False)
+    )
+
+    for df in (sabores, general):
+        if not df.empty:
+            total = float(df["Stock"].sum())
+            df["%"] = (df["Stock"] / total * 100).round(1) if total else 0
+
+    return sabores, general
+
+
+def _grafico_torta_stock(df, key):
+    if df is None or df.empty:
+        st.info("No hay datos suficientes para armar este gráfico.")
+        return
+
+    chart_df = df.copy()
+    chart_df["Stock"] = pd.to_numeric(chart_df["Stock"], errors="coerce").fillna(0).round(2)
+
+    spec = {
+        "mark": {"type": "arc", "innerRadius": 35},
+        "encoding": {
+            "theta": {"field": "Stock", "type": "quantitative"},
+            "color": {
+                "field": "Categoría",
+                "type": "nominal",
+                "legend": {"title": None},
+            },
+            "tooltip": [
+                {"field": "Categoría", "type": "nominal", "title": "Categoría"},
+                {"field": "Stock", "type": "quantitative", "title": "Stock", "format": ",.2f"},
+                {"field": "%", "type": "quantitative", "title": "%", "format": ".1f"},
+            ],
+        },
+        "view": {"stroke": None},
+    }
+
+    st.vega_lite_chart(
+        chart_df,
+        spec,
+        use_container_width=True,
+        key=key,
+    )
+
 def status_line(ok: bool, label: str, detail: str = ""):
     if ok:
         st.success(f"✅ {label}" + (f" — {detail}" if detail else ""))
@@ -698,6 +816,30 @@ def render_generar_pedido(github):
                             if "Valor Stock Actual" in df_categoria.columns:
                                 df_categoria["Valor Stock Actual"] = df_categoria["Valor Stock Actual"].apply(formato_moneda_ar)
                             st.dataframe(df_categoria, use_container_width=True)
+
+                    sabores_stock, composicion_general = _composicion_stock_desde_carrito(
+                        result_stock.get("detalle"),
+                        carrito_path,
+                    )
+
+                    st.markdown("#### Composición del stock")
+                    graf1, graf2 = st.columns(2)
+
+                    with graf1:
+                        st.markdown("**Cajas de sabores por categoría**")
+                        _grafico_torta_stock(
+                            sabores_stock,
+                            key="stock_torta_sabores",
+                        )
+
+                    with graf2:
+                        st.markdown("**Stock por categoría del Carrito**")
+                        st.caption("Todos los tipos de sabores se muestran sumados como SABORES.")
+                        _grafico_torta_stock(
+                            composicion_general,
+                            key="stock_torta_general",
+                        )
+
                     st.download_button(
                         "DESCARGAR INFORME COSTO STOCK",
                         data=output_stock.read_bytes(),
