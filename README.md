@@ -1,14 +1,14 @@
-# GridoPlanner Labs 2.3.3
+# GridoPlanner Labs 2.3.4
 
-Hotfix sobre Labs 2.3.2.
+Hotfix sobre Labs 2.3.3.
 
 Corrección:
-- Se agrega `normalize()` en `ui/home.py`.
-- Soluciona el error:
-  `name 'normalize' is not defined`
-  al leer los grupos del nuevo Mix de Ventas P1/P2.
+- La normalización usada por la interfaz ahora elimina puntuación igual que el motor.
+- Reconoce correctamente el encabezado `Cant. acum. P1`.
+- Corrige el falso mensaje:
+  `El archivo no coincide con el formato anterior ni con el nuevo formato P1/P2.`
 
 Mantiene:
 - compatibilidad con formato viejo;
-- compatibilidad con nuevo formato P1/P2;
-- uso exclusivo de `Cant. acum. P1` para el motor.
+- compatibilidad con formato nuevo P1/P2;
+- uso de `Cant. acum. P1` para el cálculo del pedido.

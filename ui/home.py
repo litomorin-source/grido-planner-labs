@@ -59,9 +59,11 @@ def format_size(size_bytes):
 
 def normalize(value):
     import unicodedata
+    import re
     s = str(value or "").strip().lower()
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
-    s = " ".join(s.split())
+    s = re.sub(r"[^a-z0-9 ]", " ", s)
+    s = re.sub(r"\\s+", " ", s).strip()
     return s
 
 
