@@ -333,14 +333,24 @@ def validar_sabores(file_path):
 
 def validar_data(file_path):
     try:
-        df = pd.read_excel(file_path, nrows=3)
+        df = pd.read_excel(file_path, nrows=5)
     except Exception as e:
         return False, f"No pude leer data Power BI. Error: {e}"
-    text = " ".join([str(x) for x in df.iloc[0].tolist()])
-    for needed in ["Categoría", "SubCategoría", "Grupo", "Producto"]:
-        if normalize(needed) not in normalize(text):
-            return False, "El archivo data no parece ser la exportación Power BI esperada."
-    return True, "Data OK"
+
+    cols_norm = [normalize(c) for c in df.columns]
+
+    # Formato nuevo: encabezados reales en la primera fila del Excel.
+    nuevo_requeridos = ["categoria", "subcategoria", "grupo", "producto", "cant acum p1"]
+    if all(any(req == c or req in c for c in cols_norm) for req in nuevo_requeridos):
+        return True, "Data OK - formato nuevo P1/P2"
+
+    # Formato viejo: la primera fila contiene Categoría / SubCategoría / Grupo / Producto.
+    if not df.empty:
+        text = " ".join([str(x) for x in df.iloc[0].tolist()])
+        if all(normalize(needed) in normalize(text) for needed in ["Categoría", "SubCategoría", "Grupo", "Producto"]):
+            return True, "Data OK - formato anterior"
+
+    return False, "El archivo data no parece ser una exportación Power BI compatible."
 
 
 def read_stock(stock_file, config, alias_map, productos_map, exclusiones):
@@ -405,13 +415,38 @@ def read_sabores(sabores_file, alias_map, productos_map, exclusiones):
 
 def read_data(data_file, config, alias_map, productos_map, exclusiones):
     data = pd.read_excel(data_file)
-    data.columns = [
-        "Categoria","SubCategoria","Grupo","Producto",
-        "PL_Cant","PL_Fact","PL_Kilos","PL_Porc",
-        "Promo_Cant","Promo_Fact","Promo_Kilos","Promo_Porc",
-        "Total_Cantidad","Total_Fact","Total_Kilos","Total_Porc"
-    ]
-    data = data.iloc[1:].copy()
+    cols_norm = {normalize(c): c for c in data.columns}
+
+    # FORMATO NUEVO SmartFran/Power BI:
+    # Categoría | Subcategoría | Grupo | Producto | Cant. acum. P1 | ...
+    # P1 es SIEMPRE el período que usa el motor para calcular ventas.
+    col_categoria = next((orig for norm, orig in cols_norm.items() if norm == "categoria"), None)
+    col_subcategoria = next((orig for norm, orig in cols_norm.items() if norm == "subcategoria"), None)
+    col_grupo = next((orig for norm, orig in cols_norm.items() if norm == "grupo"), None)
+    col_producto = next((orig for norm, orig in cols_norm.items() if norm == "producto"), None)
+    col_p1 = next((orig for norm, orig in cols_norm.items() if norm == "cant acum p1" or "cant acum p1" in norm), None)
+
+    if all([col_categoria, col_subcategoria, col_grupo, col_producto, col_p1]):
+        data = data[[col_categoria, col_subcategoria, col_grupo, col_producto, col_p1]].copy()
+        data.columns = ["Categoria", "SubCategoria", "Grupo", "Producto", "CantidadMotor"]
+
+    else:
+        # FORMATO ANTERIOR
+        if data.shape[1] != 16:
+            raise ValueError(
+                "Formato de Mix de Ventas no reconocido. "
+                "Se esperaba el formato anterior de 16 columnas o el nuevo formato P1/P2."
+            )
+
+        data.columns = [
+            "Categoria","SubCategoria","Grupo","Producto",
+            "PL_Cant","PL_Fact","PL_Kilos","PL_Porc",
+            "Promo_Cant","Promo_Fact","Promo_Kilos","Promo_Porc",
+            "Total_Cantidad","Total_Fact","Total_Kilos","Total_Porc"
+        ]
+        data = data.iloc[1:].copy()
+        data["CantidadMotor"] = data["Total_Cantidad"]
+
     for c in ["Categoria", "SubCategoria", "Grupo"]:
         data[c] = data[c].ffill()
 
@@ -432,8 +467,13 @@ def read_data(data_file, config, alias_map, productos_map, exclusiones):
         base = info["Producto Base"]
         if base in exclusiones:
             continue
-        qty_raw = safe_num(r["Total_Cantidad"], 0)
-        qty, regla = convert_quantity(raw, base, qty_raw, info.get("Tipo Presentación", ""), info.get("Pack Detectado", np.nan), productos_map)
+        qty_raw = safe_num(r["CantidadMotor"], 0)
+        qty, regla = convert_quantity(
+            raw, base, qty_raw,
+            info.get("Tipo Presentación", ""),
+            info.get("Pack Detectado", np.nan),
+            productos_map
+        )
         rows.append({
             "Origen": "Ventas data", "Grupo": r.get("Grupo", ""), "SubRubro": r.get("SubCategoria", ""),
             "Producto Base": base, "Nombre original": raw, "Cantidad Eq": qty,

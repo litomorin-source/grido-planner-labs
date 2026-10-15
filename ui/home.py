@@ -60,23 +60,47 @@ def format_size(size_bytes):
 def detectar_grupos_powerbi(file_path):
     try:
         df = pd.read_excel(file_path)
-        if df.shape[1] < 13:
-            return [], "El archivo tiene menos columnas de las esperadas."
-        df.columns = [
-            "Categoria", "SubCategoria", "Grupo", "Producto",
-            "PL_Cant", "PL_Fact", "PL_Kilos", "PL_Porc",
-            "Promo_Cant", "Promo_Fact", "Promo_Kilos", "Promo_Porc",
-            "Total_Cantidad", "Total_Fact", "Total_Kilos", "Total_Porc"
-        ]
-        df = df.iloc[1:].copy()
+        cols_norm = {normalize(c): c for c in df.columns}
+
+        # Formato nuevo P1/P2
+        col_categoria = next((orig for norm, orig in cols_norm.items() if norm == "categoria"), None)
+        col_subcategoria = next((orig for norm, orig in cols_norm.items() if norm == "subcategoria"), None)
+        col_grupo = next((orig for norm, orig in cols_norm.items() if norm == "grupo"), None)
+        col_producto = next((orig for norm, orig in cols_norm.items() if norm == "producto"), None)
+        col_p1 = next((orig for norm, orig in cols_norm.items() if norm == "cant acum p1" or "cant acum p1" in norm), None)
+
+        if all([col_categoria, col_subcategoria, col_grupo, col_producto, col_p1]):
+            df = df[[col_categoria, col_subcategoria, col_grupo, col_producto]].copy()
+            df.columns = ["Categoria", "SubCategoria", "Grupo", "Producto"]
+
+        else:
+            # Formato anterior
+            if df.shape[1] != 16:
+                return [], "El archivo no coincide con el formato anterior ni con el nuevo formato P1/P2."
+
+            df.columns = [
+                "Categoria", "SubCategoria", "Grupo", "Producto",
+                "PL_Cant", "PL_Fact", "PL_Kilos", "PL_Porc",
+                "Promo_Cant", "Promo_Fact", "Promo_Kilos", "Promo_Porc",
+                "Total_Cantidad", "Total_Fact", "Total_Kilos", "Total_Porc"
+            ]
+            df = df.iloc[1:].copy()
+
         for c in ["Categoria", "SubCategoria", "Grupo"]:
             df[c] = df[c].ffill()
+
         mask = (
             ((df["Categoria"] == "Heladería") & (df["SubCategoria"] == "Impulsivos"))
             | ((df["Categoria"] == "Congelados") & (df["Grupo"].isin(["Congelados Multimarca", "Frizzio"])))
         )
-        df = df[mask & df["Producto"].notna() & (~df["Producto"].astype(str).str.lower().eq("total"))].copy()
+        df = df[
+            mask
+            & df["Producto"].notna()
+            & (~df["Producto"].astype(str).str.lower().eq("total"))
+        ].copy()
+
         return sorted([str(g) for g in df["Grupo"].dropna().unique()]), ""
+
     except Exception as e:
         return [], f"No pude leer los grupos del Power BI. Error: {e}"
 
