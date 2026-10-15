@@ -435,7 +435,7 @@ def _pedido_metrics(result):
     }
 
 
-def render_simulador_parametros(snapshot):
+def render_simulador_parametros(snapshot, key_prefix="sim"):
     st.markdown("---")
     st.header("Simulador de parámetros")
     st.caption("Compara escenarios usando los mismos archivos del último análisis.")
@@ -447,24 +447,24 @@ def render_simulador_parametros(snapshot):
 
         with c1:
             st.subheader("Escenario A")
-            a_nombre = st.text_input("Nombre A", value="Conservador", key="sim_a_nombre")
-            a_sem = st.number_input("Semanas objetivo A", min_value=0.5, max_value=12.0, value=max(float(base_params["Semanas objetivo"]) - 1, 0.5), step=0.5, key="sim_a_sem")
-            a_rep = st.number_input("Reposición A", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key="sim_a_rep")
-            a_dias = st.number_input("Días A", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key="sim_a_dias")
+            a_nombre = st.text_input("Nombre A", value="Conservador", key=f"{key_prefix}_a_nombre")
+            a_sem = st.number_input("Semanas objetivo A", min_value=0.5, max_value=12.0, value=max(float(base_params["Semanas objetivo"]) - 1, 0.5), step=0.5, key=f"{key_prefix}_a_sem")
+            a_rep = st.number_input("Reposición A", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key=f"{key_prefix}_a_rep")
+            a_dias = st.number_input("Días A", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key=f"{key_prefix}_a_dias")
 
         with c2:
             st.subheader("Escenario B")
-            b_nombre = st.text_input("Nombre B", value="Actual", key="sim_b_nombre")
-            b_sem = st.number_input("Semanas objetivo B", min_value=0.5, max_value=12.0, value=float(base_params["Semanas objetivo"]), step=0.5, key="sim_b_sem")
-            b_rep = st.number_input("Reposición B", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key="sim_b_rep")
-            b_dias = st.number_input("Días B", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key="sim_b_dias")
+            b_nombre = st.text_input("Nombre B", value="Actual", key=f"{key_prefix}_b_nombre")
+            b_sem = st.number_input("Semanas objetivo B", min_value=0.5, max_value=12.0, value=float(base_params["Semanas objetivo"]), step=0.5, key=f"{key_prefix}_b_sem")
+            b_rep = st.number_input("Reposición B", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key=f"{key_prefix}_b_rep")
+            b_dias = st.number_input("Días B", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key=f"{key_prefix}_b_dias")
 
         with c3:
             st.subheader("Escenario C")
-            c_nombre = st.text_input("Nombre C", value="Mayor cobertura", key="sim_c_nombre")
-            c_sem = st.number_input("Semanas objetivo C", min_value=0.5, max_value=12.0, value=min(float(base_params["Semanas objetivo"]) + 1, 12.0), step=0.5, key="sim_c_sem")
-            c_rep = st.number_input("Reposición C", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key="sim_c_rep")
-            c_dias = st.number_input("Días C", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key="sim_c_dias")
+            c_nombre = st.text_input("Nombre C", value="Mayor cobertura", key=f"{key_prefix}_c_nombre")
+            c_sem = st.number_input("Semanas objetivo C", min_value=0.5, max_value=12.0, value=min(float(base_params["Semanas objetivo"]) + 1, 12.0), step=0.5, key=f"{key_prefix}_c_sem")
+            c_rep = st.number_input("Reposición C", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key=f"{key_prefix}_c_rep")
+            c_dias = st.number_input("Días C", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key=f"{key_prefix}_c_dias")
 
     if not st.button("SIMULAR ESCENARIOS", use_container_width=True):
         return
@@ -590,7 +590,7 @@ def render_generar_pedido(github):
 
     if "ultimo_analisis_snapshot" in st.session_state:
         with st.expander("Simulador del último análisis", expanded=True):
-            render_simulador_parametros(st.session_state["ultimo_analisis_snapshot"])
+            render_simulador_parametros(st.session_state["ultimo_analisis_snapshot"], key_prefix="sim_1")
     col1, col2, col3 = st.columns(3)
     with col1:
         stock_file = st.file_uploader("1. Archivo de STOCK", type=["csv"])
@@ -732,7 +732,7 @@ def render_generar_pedido(github):
                     },
                 }
 
-                render_simulador_parametros(st.session_state["ultimo_analisis_snapshot"])
+                render_simulador_parametros(st.session_state["ultimo_analisis_snapshot"], key_prefix="sim_2")
 
                 st.markdown("---")
                 st.header("Resumen final")
