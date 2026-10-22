@@ -1,4 +1,10 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
+import csv
+import hashlib
+from uuid import uuid4
+from io import BytesIO
+from openpyxl import load_workbook
 import tempfile
 from pathlib import Path
 
@@ -24,6 +30,78 @@ ADMIN_PIN = "2468"
 
 MAESTRO_GITHUB_PATH = "data/Maestro_Productos_Grido.xlsx"
 CARRITO_GITHUB_PATH = "data/Modelo_de_Carrito.xlsx"
+HISTORIAL_STOCK_PATH = "data/Historial_Valorizaciones_Stock.csv"
+COLUMNAS_HISTORIAL_STOCK = ["id", "fecha_hora", "valor_stock", "archivo_stock_sha256"]
+
+
+
+def leer_historial_stock(github):
+    """El CSV vive en GitHub, no en disco efímero de Streamlit."""
+    archivo = github.download_file_bytes(HISTORIAL_STOCK_PATH)
+    if not archivo.get("ok"):
+        info = github.get_file_info(HISTORIAL_STOCK_PATH)
+        if info.get("ok") and not info.get("exists"):
+            return [], None
+        return [], archivo.get("message", "No se pudo leer el historial")
+    try:
+        contenido = archivo["content_bytes"].decode("utf-8-sig")
+        filas = list(csv.DictReader(contenido.splitlines()))
+        return filas, None
+    except Exception as exc:
+        return [], f"No se pudo interpretar el historial: {exc}"
+
+
+def guardar_valorizacion_stock(github, valor_stock, stock_bytes):
+    filas, error = leer_historial_stock(github)
+    if error:
+        return False, error
+    instante = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires"))
+    filas.append({
+        "id": str(uuid4()),
+        "fecha_hora": instante.isoformat(timespec="seconds"),
+        "valor_stock": str(round(float(valor_stock), 2)),
+        "archivo_stock_sha256": hashlib.sha256(stock_bytes).hexdigest(),
+    })
+    buffer = BytesIO()
+    # newline fijo para que el archivo sea compatible con otros sistemas.
+    import io
+    texto = io.StringIO(newline="")
+    writer = csv.DictWriter(texto, fieldnames=COLUMNAS_HISTORIAL_STOCK, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(filas)
+    buffer.write(texto.getvalue().encode("utf-8-sig"))
+    respuesta = github.upload_bytes_file(
+        path=HISTORIAL_STOCK_PATH,
+        content_bytes=buffer.getvalue(),
+        commit_message=f"Registrar valorización stock {instante.strftime('%Y-%m-%d %H:%M')}",
+    )
+    if not respuesta.get("ok"):
+        return False, respuesta.get("message", "Error al guardar historial")
+    return True, instante.strftime("%d/%m/%Y %H:%M")
+
+
+def mostrar_historial_stock(github):
+    filas, error = leer_historial_stock(github)
+    with st.expander("Historial de valorizaciones del stock", expanded=False):
+        if error:
+            st.warning(f"No pude consultar el historial: {error}")
+            return
+        if not filas:
+            st.caption("Todavía no se registraron valorizaciones de stock.")
+            return
+        df = pd.DataFrame(filas)
+        df["valor_stock"] = pd.to_numeric(df["valor_stock"], errors="coerce")
+        df["fecha_hora"] = pd.to_datetime(df["fecha_hora"], errors="coerce", utc=True).dt.tz_convert("America/Argentina/Buenos_Aires")
+        df = df.dropna(subset=["fecha_hora", "valor_stock"]).sort_values("fecha_hora", ascending=False)
+        if df.empty:
+            st.warning("El historial no tiene registros válidos.")
+            return
+        mostrar = pd.DataFrame({
+            "Fecha y hora": df["fecha_hora"].dt.strftime("%d/%m/%Y %H:%M"),
+            "Valorización del stock": df["valor_stock"].apply(formato_moneda_ar),
+        })
+        st.dataframe(mostrar, hide_index=True, use_container_width=True)
+        st.download_button("DESCARGAR HISTORIAL CSV", data=df.to_csv(index=False).encode("utf-8-sig"), file_name="Historial_Valorizaciones_Stock.csv", mime="text/csv", key="descargar_historial_val_stock")
 
 
 def formato_moneda_ar(valor):
@@ -153,6 +231,66 @@ def _grafico_torta_stock(df, key):
         use_container_width=True,
         key=key,
     )
+
+
+def generar_carrito_importacion(pedido, carrito_path):
+    """Conserva todas las columnas del Carrito y exporta solo filas con pedido.
+
+    Código se guarda como texto y Cantidad como número entero (packs).
+    """
+    import math
+
+    libro = load_workbook(carrito_path)
+    hoja = libro.active
+    columnas = {str(c.value).strip(): c.column for c in hoja[1] if c.value is not None}
+    for necesaria in ("Codigo", "Cantidad"):
+        if necesaria not in columnas:
+            raise ValueError(f"La plantilla del Carrito no tiene la columna {necesaria}.")
+
+    pedidos = {}
+    for _, fila in pedido.iterrows():
+        codigo = _codigo_clave(fila.get("Código Compra"))
+        cantidad = pd.to_numeric(fila.get("Packs a Comprar"), errors="coerce")
+        if not codigo or pd.isna(cantidad) or cantidad <= 0:
+            continue
+        if not math.isclose(float(cantidad), round(float(cantidad)), abs_tol=1e-9):
+            raise ValueError(f"La cantidad del código {codigo} no es entera: {cantidad}")
+        pedidos[codigo] = pedidos.get(codigo, 0) + int(round(float(cantidad)))
+
+    encontrados = set()
+    filas_sin_pedido = []
+    for nro_fila in range(2, hoja.max_row + 1):
+        codigo_cell = hoja.cell(row=nro_fila, column=columnas["Codigo"])
+        cantidad_cell = hoja.cell(row=nro_fila, column=columnas["Cantidad"])
+        codigo = _codigo_clave(codigo_cell.value)
+        if codigo not in pedidos:
+            filas_sin_pedido.append(nro_fila)
+            continue
+
+        # El sistema exige código como texto y cantidad como número.
+        codigo_cell.value = codigo
+        codigo_cell.number_format = "@"
+        cantidad_cell.value = pedidos[codigo]
+        cantidad_cell.number_format = "0"
+        encontrados.add(codigo)
+
+    faltantes = sorted(set(pedidos) - encontrados)
+    if faltantes:
+        raise ValueError(
+            "Hay códigos del pedido que no aparecen en la plantilla del Carrito: "
+            + ", ".join(faltantes[:20])
+            + (" ..." if len(faltantes) > 20 else "")
+            + ". Actualizá el Carrito antes de generar el archivo de importación."
+        )
+
+    # Se eliminan solamente filas sin cantidad; se conservan todas las columnas
+    # y los encabezados y estilos de la plantilla del sistema de compras.
+    for nro_fila in reversed(filas_sin_pedido):
+        hoja.delete_rows(nro_fila, 1)
+
+    salida = BytesIO()
+    libro.save(salida)
+    return salida.getvalue(), len(encontrados), sum(pedidos.values())
 
 def status_line(ok: bool, label: str, detail: str = ""):
     if ok:
@@ -799,6 +937,7 @@ def render_generar_pedido(github):
         st.markdown("---")
         if "stock" in paths:
             st.subheader("Informe costo stock")
+            mostrar_historial_stock(github)
             if st.button("GENERAR INFORME COSTO STOCK", use_container_width=True):
                 output_stock = tmp / "Informe_Costo_Stock.xlsx"
                 try:
@@ -809,7 +948,15 @@ def render_generar_pedido(github):
                         carrito_file=carrito_path,
                     )
                     st.success("Informe de costo de stock generado correctamente.")
-                    st.metric("Valor stock actual", formato_moneda_ar(result_stock.get("valor_stock_total", 0)))
+                    valor_total_stock = result_stock.get("valor_stock_total", 0)
+                    guardado, resultado_guardado = guardar_valorizacion_stock(
+                        github, valor_total_stock, stock_file.getvalue()
+                    )
+                    if guardado:
+                        st.success(f"Valorización guardada en el historial · {resultado_guardado}")
+                    else:
+                        st.error(f"El informe se generó, pero NO se guardó en el historial: {resultado_guardado}")
+                    st.metric("Valor stock actual", formato_moneda_ar(valor_total_stock))
                     if result_stock.get("categoria") is not None:
                         with st.expander("Ver valorización por categoría", expanded=False):
                             df_categoria = result_stock["categoria"].copy()
@@ -927,6 +1074,24 @@ def render_generar_pedido(github):
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
+                try:
+                    carrito_importable, cantidad_productos, total_packs = generar_carrito_importacion(
+                        pedido, carrito_path
+                    )
+                    st.download_button(
+                        "DESCARGAR CARRITO PARA IMPORTAR",
+                        data=carrito_importable,
+                        file_name="Carrito_Importar.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="descargar_carrito_importacion",
+                    )
+                    st.caption(
+                        f"Carrito importable: {cantidad_productos} productos · {total_packs} packs. "
+                        "Solo productos con cantidad > 0; todas las columnas originales. Código como texto y cantidad numérica."
+                    )
+                except Exception as exc_importacion:
+                    st.warning(f"No se pudo preparar el carrito para importar: {exc_importacion}")
                 with st.expander("Ver vista previa del pedido", expanded=False):
                     st.dataframe(pedido.head(100), use_container_width=True)
                 if stock_negativo is not None and len(stock_negativo) > 0:
