@@ -2,6 +2,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import csv
 import hashlib
+import re
 from uuid import uuid4
 from io import BytesIO
 from openpyxl import load_workbook
@@ -31,8 +32,22 @@ ADMIN_PIN = "2468"
 MAESTRO_GITHUB_PATH = "data/Maestro_Productos_Grido.xlsx"
 CARRITO_GITHUB_PATH = "data/Modelo_de_Carrito.xlsx"
 HISTORIAL_STOCK_PATH = "data/Historial_Valorizaciones_Stock.csv"
-COLUMNAS_HISTORIAL_STOCK = ["id", "fecha_hora", "valor_stock", "archivo_stock_sha256"]
+COLUMNAS_HISTORIAL_STOCK = [
+    "id", "fecha_hora", "fecha_stock", "nombre_archivo", "valor_stock", "archivo_stock_sha256"
+]
 
+
+def fecha_desde_nombre_stock(nombre):
+    """SmartFran: Stock_YYYYMMDD_HHMMSS.csv. Hora local de Argentina."""
+    nombre = Path(str(nombre)).name
+    encontrado = re.fullmatch(r"Stock_(\d{8})_(\d{6})(?:\s*\(\d+\))?\.csv", nombre, re.IGNORECASE)
+    if not encontrado:
+        return None
+    try:
+        dt = datetime.strptime(''.join(encontrado.groups()[:2]), "%Y%m%d%H%M%S")
+        return dt.replace(tzinfo=ZoneInfo("America/Argentina/Buenos_Aires"))
+    except ValueError:
+        return None
 
 
 def leer_historial_stock(github):
@@ -51,7 +66,27 @@ def leer_historial_stock(github):
         return [], f"No se pudo interpretar el historial: {exc}"
 
 
-def guardar_valorizacion_stock(github, valor_stock, stock_bytes):
+def escribir_historial_stock(github, filas, descripcion):
+    import io
+    texto = io.StringIO(newline="")
+    writer = csv.DictWriter(texto, fieldnames=COLUMNAS_HISTORIAL_STOCK, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(filas)
+    respuesta = github.upload_bytes_file(
+        path=HISTORIAL_STOCK_PATH,
+        content_bytes=texto.getvalue().encode("utf-8-sig"),
+        commit_message=descripcion,
+    )
+    if not respuesta.get("ok"):
+        return False, respuesta.get("message", "Error al guardar historial")
+    return True, None
+
+
+def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo):
+    fecha_stock = fecha_desde_nombre_stock(nombre_archivo)
+    if fecha_stock is None:
+        return False, ("El nombre del archivo no tiene el formato esperado "
+                       "Stock_AAAAMMDD_HHMMSS.csv. No guardé una fecha incorrecta.")
     filas, error = leer_historial_stock(github)
     if error:
         return False, error
@@ -59,25 +94,17 @@ def guardar_valorizacion_stock(github, valor_stock, stock_bytes):
     filas.append({
         "id": str(uuid4()),
         "fecha_hora": instante.isoformat(timespec="seconds"),
+        "fecha_stock": fecha_stock.isoformat(timespec="seconds"),
+        "nombre_archivo": str(nombre_archivo),
         "valor_stock": str(round(float(valor_stock), 2)),
         "archivo_stock_sha256": hashlib.sha256(stock_bytes).hexdigest(),
     })
-    buffer = BytesIO()
-    # newline fijo para que el archivo sea compatible con otros sistemas.
-    import io
-    texto = io.StringIO(newline="")
-    writer = csv.DictWriter(texto, fieldnames=COLUMNAS_HISTORIAL_STOCK, extrasaction="ignore")
-    writer.writeheader()
-    writer.writerows(filas)
-    buffer.write(texto.getvalue().encode("utf-8-sig"))
-    respuesta = github.upload_bytes_file(
-        path=HISTORIAL_STOCK_PATH,
-        content_bytes=buffer.getvalue(),
-        commit_message=f"Registrar valorización stock {instante.strftime('%Y-%m-%d %H:%M')}",
+    ok, msg = escribir_historial_stock(
+        github, filas, f"Registrar valorización de stock {fecha_stock.strftime('%Y-%m-%d %H:%M')}"
     )
-    if not respuesta.get("ok"):
-        return False, respuesta.get("message", "Error al guardar historial")
-    return True, instante.strftime("%d/%m/%Y %H:%M")
+    if not ok:
+        return False, msg
+    return True, fecha_stock.strftime("%d/%m/%Y %H:%M")
 
 
 def mostrar_historial_stock(github):
@@ -90,18 +117,53 @@ def mostrar_historial_stock(github):
             st.caption("Todavía no se registraron valorizaciones de stock.")
             return
         df = pd.DataFrame(filas)
+        for c in COLUMNAS_HISTORIAL_STOCK:
+            if c not in df.columns:
+                df[c] = ""
         df["valor_stock"] = pd.to_numeric(df["valor_stock"], errors="coerce")
-        df["fecha_hora"] = pd.to_datetime(df["fecha_hora"], errors="coerce", utc=True).dt.tz_convert("America/Argentina/Buenos_Aires")
-        df = df.dropna(subset=["fecha_hora", "valor_stock"]).sort_values("fecha_hora", ascending=False)
+        df["fecha_hora_parseada"] = pd.to_datetime(df["fecha_hora"], errors="coerce", utc=True).dt.tz_convert("America/Argentina/Buenos_Aires")
+        df["fecha_stock_parseada"] = pd.to_datetime(df["fecha_stock"], errors="coerce", utc=True).dt.tz_convert("America/Argentina/Buenos_Aires")
+        df = df.dropna(subset=["valor_stock"]).copy()
+        df["fecha_orden"] = df["fecha_stock_parseada"].fillna(df["fecha_hora_parseada"])
+        df = df.sort_values("fecha_orden", ascending=False, na_position="last")
         if df.empty:
             st.warning("El historial no tiene registros válidos.")
             return
+        def fecha_visible(v):
+            return v.strftime("%d/%m/%Y %H:%M") if pd.notna(v) else "—"
         mostrar = pd.DataFrame({
-            "Fecha y hora": df["fecha_hora"].dt.strftime("%d/%m/%Y %H:%M"),
+            "Fecha del stock": df["fecha_stock_parseada"].apply(fecha_visible),
+            "Registrado el": df["fecha_hora_parseada"].apply(fecha_visible),
+            "Archivo": df["nombre_archivo"].fillna("").replace("", "Archivo anterior sin nombre"),
             "Valorización del stock": df["valor_stock"].apply(formato_moneda_ar),
         })
         st.dataframe(mostrar, hide_index=True, use_container_width=True)
-        st.download_button("DESCARGAR HISTORIAL CSV", data=df.to_csv(index=False).encode("utf-8-sig"), file_name="Historial_Valorizaciones_Stock.csv", mime="text/csv", key="descargar_historial_val_stock")
+        st.download_button("DESCARGAR HISTORIAL CSV", data=df[COLUMNAS_HISTORIAL_STOCK].to_csv(index=False).encode("utf-8-sig"), file_name="Historial_Valorizaciones_Stock.csv", mime="text/csv", key="descargar_historial_val_stock")
+        st.markdown("**Eliminar un registro**")
+        opciones = {}
+        for _, fila in df.iterrows():
+            identificador = str(fila.get("id", ""))
+            if not identificador:
+                continue
+            nombre = str(fila.get("nombre_archivo", "")).strip() or "Registro anterior"
+            fecha = fecha_visible(fila["fecha_stock_parseada"] if pd.notna(fila["fecha_stock_parseada"]) else fila["fecha_hora_parseada"])
+            etiqueta = f"{fecha} · {formato_moneda_ar(fila['valor_stock'])} · {nombre} · {identificador[:8]}"
+            opciones[etiqueta] = identificador
+        if opciones:
+            eleccion = st.selectbox("Registro a borrar", list(opciones.keys()), key="historico_stock_elegir_borrar")
+            confirmar = st.checkbox("Confirmo que quiero borrar este registro del historial", key="historico_stock_confirmar_borrar")
+            if st.button("ELIMINAR REGISTRO", disabled=not confirmar, key="historico_stock_borrar"):
+                elegido = opciones[eleccion]
+                nuevas = [fila for fila in filas if str(fila.get("id", "")) != elegido]
+                if len(nuevas) == len(filas):
+                    st.error("No encontré ese registro para borrar.")
+                else:
+                    ok, msg = escribir_historial_stock(github, nuevas, "Eliminar registro de valorización stock")
+                    if ok:
+                        st.success("Registro eliminado del historial.")
+                        st.rerun()
+                    else:
+                        st.error(f"No se pudo borrar: {msg}")
 
 
 def formato_moneda_ar(valor):
@@ -950,7 +1012,7 @@ def render_generar_pedido(github):
                     st.success("Informe de costo de stock generado correctamente.")
                     valor_total_stock = result_stock.get("valor_stock_total", 0)
                     guardado, resultado_guardado = guardar_valorizacion_stock(
-                        github, valor_total_stock, stock_file.getvalue()
+                        github, valor_total_stock, stock_file.getvalue(), stock_file.name
                     )
                     if guardado:
                         st.success(f"Valorización guardada en el historial · {resultado_guardado}")
