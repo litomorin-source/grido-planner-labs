@@ -935,9 +935,9 @@ def render_generar_pedido(github):
             st.info("📄 Power BI: pendiente")
 
         st.markdown("---")
+        st.subheader("Informe costo stock")
+        mostrar_historial_stock(github)
         if "stock" in paths:
-            st.subheader("Informe costo stock")
-            mostrar_historial_stock(github)
             if st.button("GENERAR INFORME COSTO STOCK", use_container_width=True):
                 output_stock = tmp / "Informe_Costo_Stock.xlsx"
                 try:
