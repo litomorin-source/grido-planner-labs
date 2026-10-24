@@ -2,6 +2,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import csv
 import hashlib
+import json
 import re
 from uuid import uuid4
 from io import BytesIO
@@ -17,6 +18,7 @@ from core.github_sync import GitHubSync
 from core.validators import validar_maestro, validar_carrito
 from core.version import APP_VERSION
 from core.maestro_diff import comparar_maestros
+from core.costos_mix import calcular_costos_mix
 
 from motor import (
     procesar_archivos,
@@ -33,7 +35,8 @@ MAESTRO_GITHUB_PATH = "data/Maestro_Productos_Grido.xlsx"
 CARRITO_GITHUB_PATH = "data/Modelo_de_Carrito.xlsx"
 HISTORIAL_STOCK_PATH = "data/Historial_Valorizaciones_Stock.csv"
 COLUMNAS_HISTORIAL_STOCK = [
-    "id", "fecha_hora", "fecha_stock", "nombre_archivo", "valor_stock", "archivo_stock_sha256"
+    "id", "fecha_hora", "fecha_stock", "nombre_archivo", "valor_stock", "archivo_stock_sha256",
+    "cantidad_unidades", "detalle_categorias_json"
 ]
 
 
@@ -82,7 +85,7 @@ def escribir_historial_stock(github, filas, descripcion):
     return True, None
 
 
-def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo):
+def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo, detalle_stock=None, categorias_stock=None):
     fecha_stock = fecha_desde_nombre_stock(nombre_archivo)
     if fecha_stock is None:
         return False, ("El nombre del archivo no tiene el formato esperado "
@@ -91,6 +94,15 @@ def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo)
     if error:
         return False, error
     instante = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires"))
+    # Stock representa las unidades equivalentes que usa el motor; puede contener decimales.
+    cantidad_unidades = ""
+    if detalle_stock is not None and not detalle_stock.empty and "Stock" in detalle_stock.columns:
+        cantidad_unidades = str(round(float(pd.to_numeric(detalle_stock["Stock"], errors="coerce").fillna(0).sum()), 3))
+    detalle_categorias_json = ""
+    if categorias_stock is not None and not categorias_stock.empty:
+        cols = [c for c in ["Grupo", "Stock", "Valor Stock Actual"] if c in categorias_stock.columns]
+        if len(cols) == 3:
+            detalle_categorias_json = json.dumps(categorias_stock[cols].where(pd.notna(categorias_stock[cols]), None).to_dict(orient="records"), ensure_ascii=False)
     filas.append({
         "id": str(uuid4()),
         "fecha_hora": instante.isoformat(timespec="seconds"),
@@ -98,6 +110,8 @@ def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo)
         "nombre_archivo": str(nombre_archivo),
         "valor_stock": str(round(float(valor_stock), 2)),
         "archivo_stock_sha256": hashlib.sha256(stock_bytes).hexdigest(),
+        "cantidad_unidades": cantidad_unidades,
+        "detalle_categorias_json": detalle_categorias_json,
     })
     ok, msg = escribir_historial_stock(
         github, filas, f"Registrar valorización de stock {fecha_stock.strftime('%Y-%m-%d %H:%M')}"
@@ -121,6 +135,7 @@ def mostrar_historial_stock(github):
             if c not in df.columns:
                 df[c] = ""
         df["valor_stock"] = pd.to_numeric(df["valor_stock"], errors="coerce")
+        df["cantidad_unidades"] = pd.to_numeric(df["cantidad_unidades"], errors="coerce")
         df["fecha_hora_parseada"] = pd.to_datetime(df["fecha_hora"], errors="coerce", utc=True).dt.tz_convert("America/Argentina/Buenos_Aires")
         df["fecha_stock_parseada"] = pd.to_datetime(df["fecha_stock"], errors="coerce", utc=True).dt.tz_convert("America/Argentina/Buenos_Aires")
         df = df.dropna(subset=["valor_stock"]).copy()
@@ -136,8 +151,32 @@ def mostrar_historial_stock(github):
             "Registrado el": df["fecha_hora_parseada"].apply(fecha_visible),
             "Archivo": df["nombre_archivo"].fillna("").replace("", "Archivo anterior sin nombre"),
             "Valorización del stock": df["valor_stock"].apply(formato_moneda_ar),
+            "Unidades equivalentes": df["cantidad_unidades"].apply(lambda v: f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if pd.notna(v) else "—"),
         })
         st.dataframe(mostrar, hide_index=True, use_container_width=True)
+
+        st.markdown("#### Evolución histórica del stock")
+        graficos = df.dropna(subset=["fecha_orden"]).sort_values("fecha_orden", ascending=True)
+        if not graficos.empty:
+            # El índice se conserva como fecha/hora; registros repetidos de un mismo stock
+            # quedan diferenciados por la hora del registro si la tienen.
+            con_pesos = graficos[["fecha_orden", "valor_stock"]].dropna().rename(
+                columns={"fecha_orden": "Fecha", "valor_stock": "Valorización ($)"}
+            ).set_index("Fecha")
+            st.markdown("**Valorización del stock ($)**")
+            st.line_chart(con_pesos, use_container_width=True)
+
+            con_unidades = graficos[["fecha_orden", "cantidad_unidades"]].dropna().rename(
+                columns={"fecha_orden": "Fecha", "cantidad_unidades": "Unidades equivalentes"}
+            ).set_index("Fecha")
+            st.markdown("**Cantidad en stock (unidades equivalentes)**")
+            if not con_unidades.empty:
+                st.line_chart(con_unidades, use_container_width=True)
+                st.caption("Se suman las unidades equivalentes del motor (incluye tachos/cajas y productos individuales). "
+                           "No equivale necesariamente a unidades de venta al público. Los registros anteriores no tienen cantidad.")
+            else:
+                st.info("Las cantidades comenzarán a aparecer al generar una nueva valorización. Los registros anteriores solo tienen pesos.")
+
         st.download_button("DESCARGAR HISTORIAL CSV", data=df[COLUMNAS_HISTORIAL_STOCK].to_csv(index=False).encode("utf-8-sig"), file_name="Historial_Valorizaciones_Stock.csv", mime="text/csv", key="descargar_historial_val_stock")
         st.markdown("**Eliminar un registro**")
         opciones = {}
@@ -1012,7 +1051,8 @@ def render_generar_pedido(github):
                     st.success("Informe de costo de stock generado correctamente.")
                     valor_total_stock = result_stock.get("valor_stock_total", 0)
                     guardado, resultado_guardado = guardar_valorizacion_stock(
-                        github, valor_total_stock, stock_file.getvalue(), stock_file.name
+                        github, valor_total_stock, stock_file.getvalue(), stock_file.name,
+                        detalle_stock=result_stock.get("detalle"), categorias_stock=result_stock.get("categoria")
                     )
                     if guardado:
                         st.success(f"Valorización guardada en el historial · {resultado_guardado}")
@@ -1063,6 +1103,23 @@ def render_generar_pedido(github):
         if not ready:
             st.info("Cuando los 3 archivos estén en OK, se habilita la generación del pedido.")
             st.stop()
+
+        st.markdown("---")
+        st.subheader("Análisis según tu mix de ventas del período")
+        st.caption("Costo de reposición con precios actuales del Carrito; composición de las ventas según los archivos cargados. No es el CMV contable.")
+        if st.button("CALCULAR COSTOS SEGÚN MI MIX", key="costos_mix_240", use_container_width=True):
+            try:
+                indicadores, detalle_costos = calcular_costos_mix(paths["sabores"], paths["data"], maestro_path, carrito_path)
+                st.session_state["costos_mix_actual"] = (indicadores, detalle_costos)
+            except Exception as e:
+                st.error(f"No se pudo calcular el costo del mix: {e}")
+        if "costos_mix_actual" in st.session_state:
+            indicadores, detalle_costos = st.session_state["costos_mix_actual"]
+            st.dataframe(indicadores, use_container_width=True, hide_index=True)
+            st.warning("El costo total se calcula sobre productos con precio y kilos válidos. Revisá la cobertura antes de usarlo como costo total de toda la sucursal.")
+            with st.expander("Auditar costos por producto y faltantes"):
+                st.dataframe(detalle_costos.drop(columns=["clave"], errors="ignore"), use_container_width=True, hide_index=True)
+            st.download_button("DESCARGAR DETALLE DE COSTOS (CSV)",detalle_costos.to_csv(index=False).encode("utf-8-sig"),file_name="Costos_segun_mix.csv",mime="text/csv",key="desc_costos_mix_240")
 
         st.success("✅ Todo listo para generar el pedido.")
         if st.button("ANALIZAR Y GENERAR PEDIDO", type="primary", use_container_width=True):

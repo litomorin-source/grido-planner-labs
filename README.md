@@ -1,13 +1,9 @@
-# GridoPlanner Labs 2.3.7
+# GridoPlanner Labs 2.4.0
 
-Hotfix sobre Labs 2.3.6.
+Versión experimental con módulo Análisis según tu mix de ventas del período y cálculo de costos de reposición.
 
-Corrección:
-- Soluciona `StreamlitDuplicateElementId` en el simulador.
-- El botón `SIMULAR ESCENARIOS` ahora tiene key única por instancia.
-- Se revisan los botones del simulador para evitar colisiones de IDs.
+Conserva los módulos existentes de pedido, valorización de stock, simulador e históricos.
 
-No cambia:
-- lógica del motor;
-- cálculo de pedidos;
-- compatibilidad con Mix viejo/nuevo P1-P2.
+Las capturas de tutorial están conservadas en assets/screenshots/; no se duplican en la raíz.
+
+Esta versión es para pruebas en Labs, no para producción.
