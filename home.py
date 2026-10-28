@@ -217,35 +217,68 @@ def formato_moneda_ar(valor):
 
 
 def formatear_importes_informe(df):
-    """Formatea solamente importes para mostrar, sin alterar datos ni exportaciones."""
+    """Formatea importes y porcentajes para mostrar, sin alterar datos ni exportaciones."""
     if df is None or not isinstance(df, pd.DataFrame):
         return df
+
     resultado = df.copy()
+
+    def _serie_numerica(serie):
+        if pd.api.types.is_numeric_dtype(serie):
+            return serie
+        limpia = (
+            serie.astype(str)
+            .str.replace("$", "", regex=False)
+            .str.replace("%", "", regex=False)
+            .str.replace(".", "", regex=False)
+            .str.replace(",", ".", regex=False)
+            .str.strip()
+        )
+        return pd.to_numeric(limpia, errors="coerce")
+
+    def _formato_pesos(valor, decimales=False):
+        if pd.isna(valor):
+            return "—"
+        valor = float(valor)
+        if decimales:
+            texto = f"{abs(valor):,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+        else:
+            texto = f"{abs(valor):,.0f}".replace(",", ".")
+        return f"{'-' if valor < 0 else ''}$ {texto}"
+
+    def _formato_porcentaje(valor):
+        if pd.isna(valor):
+            return "—"
+        valor = float(valor)
+        if abs(valor - round(valor)) < 1e-9:
+            texto = f"{int(round(valor))}"
+        else:
+            texto = f"{valor:,.1f}".replace(",", "_").replace(".", ",").replace("_", ".")
+        return f"{texto}%"
+
     for columna in resultado.columns:
         etiqueta = str(columna).strip().lower()
-        # Estas columnas son cantidades, porcentajes, códigos u otras unidades.
-        if any(x in etiqueta for x in ('código', 'codigo', 'cantidad', 'kilos', 'stock', 'semanas', 'ventas', 'venta semanal', 'packs', 'unidades', 'cobertura', 'porcent', '%')) and not any(x in etiqueta for x in ('valor stock', 'valor pedido', 'costo', 'precio', 'importe', 'facturación')):
+        serie_num = _serie_numerica(resultado[columna])
+        if serie_num.notna().sum() == 0:
             continue
+
+        es_porcentaje = any(x in etiqueta for x in ('cobertura', 'porcent', '%'))
         es_pesos = any(x in etiqueta for x in (
             'valor stock', 'valor pedido', 'valor actual', 'valor estimado',
             'dif. valor', 'costo', 'precio', 'importe', 'facturación',
             'valorización', 'valor reposición', 'valor de reposición',
         ))
+
+        if es_porcentaje and not es_pesos:
+            resultado[columna] = serie_num.map(_formato_porcentaje)
+            continue
+
         if not es_pesos:
             continue
-        if not pd.api.types.is_numeric_dtype(resultado[columna]):
-            continue
+
         con_decimales = ('por kg' in etiqueta or '/kg' in etiqueta or 'por kilo' in etiqueta)
-        def formato(x):
-            if pd.isna(x):
-                return '—'
-            valor = float(x)
-            if con_decimales:
-                texto = f'{abs(valor):,.2f}'.replace(',', '_').replace('.', ',').replace('_', '.')
-            else:
-                texto = f'{abs(valor):,.0f}'.replace(',', '.')
-            return f"{'-' if valor < 0 else ''}$ {texto}"
-        resultado[columna] = resultado[columna].map(formato)
+        resultado[columna] = serie_num.map(lambda x: _formato_pesos(x, decimales=con_decimales))
+
     return resultado
 
 
