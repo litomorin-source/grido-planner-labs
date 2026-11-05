@@ -1061,9 +1061,12 @@ def _descargas_pedido_aisladas():
 def render_generar_pedido(github):
     st.header("Generar pedido")
     st.caption("Subí Stock, Sabores y Power BI. El Maestro y el Carrito vigentes se toman automáticamente.")
+    st.caption("**Interfaz Labs: FIX-20261105-03 · descargas persistentes y formato ARS**")
     # Los dos archivos están disponibles antes de cualquier validación/st.stop.
     # El fragmento evita el rerun completo al hacer clic en descargar.
-    _descargas_pedido_aisladas()
+    _descargas_visibles_arriba = bool(st.session_state.get("pedido_descargas_labs"))
+    if _descargas_visibles_arriba:
+        _descargas_pedido_aisladas()
 
     if "ultimo_analisis_snapshot" in st.session_state:
         with st.expander("Simulador del último análisis", expanded=True):
@@ -1238,7 +1241,9 @@ def render_generar_pedido(github):
             indicadores, detalle_costos = st.session_state["costos_mix_actual"]
             # Forzar la conversión a cadenas locales antes de enviar la tabla a Streamlit.
             indicadores_visibles = _mostrar_indicadores_costos_mix(indicadores)
-            st.dataframe(indicadores_visibles, use_container_width=True, hide_index=True)
+            # Tabla de texto ya formateado: así Streamlit no puede revertir el formato
+            # a valores numéricos mediante inferencia de tipos.
+            st.dataframe(indicadores_visibles.astype(str), use_container_width=True, hide_index=True)
             st.warning("El costo total se calcula sobre productos con precio y kilos válidos. Revisá la cobertura antes de usarlo como costo total de toda la sucursal.")
             with st.expander("Auditar costos por producto y faltantes"):
                 st.dataframe(formatear_importes_informe(detalle_costos.drop(columns=["clave"], errors="ignore")), use_container_width=True, hide_index=True)
@@ -1296,9 +1301,8 @@ def render_generar_pedido(github):
                     "carrito_info": carrito_info,
                     "result": result,
                 }
-                # Una sola actualización después de generar: los botones aparecen arriba,
-                # juntos, y cada descarga funciona de manera independiente.
-                st.rerun()
+                # No forzar rerun: mostrarlos inmediatamente en esta misma ejecución.
+                st.success("Los dos archivos del pedido quedaron preparados para descargar.")
             except Exception as e:
                 st.error("Ocurrió un error al generar el pedido.")
                 st.exception(e)
@@ -1307,6 +1311,8 @@ def render_generar_pedido(github):
         # después de cualquier rerun causado por una descarga.
         estado_pedido = st.session_state.get("pedido_descargas_labs")
         if estado_pedido:
+            if not _descargas_visibles_arriba:
+                _descargas_pedido_aisladas()
             result = estado_pedido["result"]
             pedido = result["pedido"]
             sin_clasificar = result["sin_clasificar"]
