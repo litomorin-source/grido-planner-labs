@@ -34,11 +34,124 @@ ADMIN_PIN = "2468"
 MAESTRO_GITHUB_PATH = "data/Maestro_Productos_Grido.xlsx"
 CARRITO_GITHUB_PATH = "data/Modelo_de_Carrito.xlsx"
 HISTORIAL_STOCK_PATH = "data/Historial_Valorizaciones_Stock.csv"
+OMISIONES_PEDIDO_PATH = "data/Omisiones_Futuros_Pedidos.csv"
 COLUMNAS_HISTORIAL_STOCK = [
     "id", "fecha_hora", "fecha_stock", "nombre_archivo", "valor_stock", "archivo_stock_sha256",
     "cantidad_unidades", "detalle_categorias_json"
 ]
 
+
+
+def leer_omisiones_pedido(github):
+    """Omisiones persistentes independientes del Maestro."""
+    info = github.get_file_info(OMISIONES_PEDIDO_PATH)
+    if not info.get("ok"):
+        raise RuntimeError(info.get("message", "No se pudo consultar la lista de omisiones"))
+    if not info.get("exists"):
+        return []
+    respuesta = github.download_file_bytes(OMISIONES_PEDIDO_PATH)
+    if not respuesta.get("ok"):
+        raise RuntimeError(respuesta.get("message", "No se pudo descargar la lista de omisiones"))
+    contenido = respuesta["content_bytes"].decode("utf-8-sig")
+    return [fila for fila in csv.DictReader(contenido.splitlines())
+            if str(fila.get("producto_base", "")).strip()]
+
+
+def escribir_omisiones_pedido(github, filas):
+    from io import StringIO
+    buffer = StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=["producto_base", "fecha", "motivo"], extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(filas)
+    respuesta = github.upload_bytes_file(
+        path=OMISIONES_PEDIDO_PATH,
+        content_bytes=buffer.getvalue().encode("utf-8-sig"),
+        commit_message="Actualizar omisiones de pedidos GridoPlanner Labs",
+    )
+    if not respuesta.get("ok"):
+        raise RuntimeError(respuesta.get("message", "No se pudo guardar la lista de omisiones"))
+
+
+def maestro_para_pedido(maestro_path, carpeta, omisiones):
+    """Agrega exclusiones al Maestro TEMPORAL, sin escribir en data/Maestro..."""
+    bases = sorted({normalize(fila.get("producto_base", "")) for fila in omisiones}
+                   - {""})
+    if not bases:
+        return maestro_path
+    copia = Path(carpeta) / "Maestro_omision_pedidos_temporal.xlsx"
+    wb = load_workbook(maestro_path)
+    if "Exclusiones" not in wb.sheetnames:
+        raise ValueError("El Maestro no tiene la hoja Exclusiones")
+    hoja = wb["Exclusiones"]
+    ya = {normalize(fila[0]) for fila in hoja.iter_rows(min_row=2, values_only=True)
+          if fila and fila[0] is not None}
+    for base in bases:
+        if base not in ya:
+            hoja.append([base, "Omitido para pedidos en lista externa de Labs"])
+    wb.save(copia)
+    return copia
+
+
+def _control_omitir_faltantes(github, posibles_faltantes):
+    """Omisión reversible que no cambia el Maestro ni su historial."""
+    st.markdown("**Omitir productos discontinuados de próximos pedidos**")
+    st.caption("Se guarda una lista independiente del Maestro. Al marcar un producto, "
+               "se excluye en los próximos análisis, pedidos y simulaciones de Labs.")
+    try:
+        omisiones = leer_omisiones_pedido(github)
+    except Exception as exc:
+        st.error(f"No pude cargar las omisiones: {exc}")
+        return
+
+    activos = {normalize(f.get("producto_base", "")) for f in omisiones}
+    if posibles_faltantes is not None and not posibles_faltantes.empty and "Producto" in posibles_faltantes.columns:
+        candidatos = sorted({str(x).strip() for x in posibles_faltantes["Producto"].dropna()
+                             if str(x).strip() and normalize(x) not in activos})
+        if candidatos:
+            elegido = st.selectbox("Producto a omitir", candidatos, key="omision_faltantes_producto")
+            if st.button("OMITIR DE FUTUROS PEDIDOS", key="omision_faltantes_guardar"):
+                base = normalize(elegido)
+                # Releer antes de guardar por si otro usuario hizo una modificación.
+                actual = leer_omisiones_pedido(github)
+                if base not in {normalize(f.get("producto_base", "")) for f in actual}:
+                    actual.append({
+                        "producto_base": base,
+                        "fecha": datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).isoformat(timespec="seconds"),
+                        "motivo": "Marcado como discontinuado desde Posibles faltantes",
+                    })
+                    try:
+                        escribir_omisiones_pedido(github, actual)
+                    except Exception as exc:
+                        st.error(f"No se pudo guardar la omisión: {exc}")
+                        return
+                # Evitar mostrar o descargar un pedido calculado antes del cambio.
+                st.session_state.pop("pedido_descargas_labs", None)
+                st.session_state.pop("ultimo_analisis_snapshot", None)
+                st.session_state["mensaje_omision_pedido"] = (
+                    f"{elegido}: omitido de futuros pedidos. Generá un pedido nuevo para aplicar el cambio."
+                )
+                st.rerun()
+        else:
+            st.info("No hay nuevos faltantes para omitir en este análisis.")
+
+    if omisiones:
+        with st.expander(f"Administrar omisiones guardadas ({len(omisiones)})", expanded=False):
+            opciones = sorted({f.get("producto_base", "") for f in omisiones if f.get("producto_base")})
+            quitar = st.selectbox("Producto que querés volver a incluir", opciones, key="omision_faltantes_revertir_producto")
+            if st.button("VOLVER A INCLUIR", key="omision_faltantes_revertir"):
+                try:
+                    actual = leer_omisiones_pedido(github)
+                    nuevos = [f for f in actual if normalize(f.get("producto_base", "")) != normalize(quitar)]
+                    escribir_omisiones_pedido(github, nuevos)
+                except Exception as exc:
+                    st.error(f"No se pudo revertir la omisión: {exc}")
+                    return
+                st.session_state.pop("pedido_descargas_labs", None)
+                st.session_state.pop("ultimo_analisis_snapshot", None)
+                st.session_state["mensaje_omision_pedido"] = (
+                    f"{quitar}: nuevamente incluido para próximos análisis. Generá el pedido otra vez."
+                )
+                st.rerun()
 
 def fecha_desde_nombre_stock(nombre):
     """SmartFran: Stock_YYYYMMDD_HHMMSS.csv. Hora local de Argentina."""
@@ -214,6 +327,82 @@ def formato_moneda_ar(valor):
     entero_txt = f"{abs(valor):,}".replace(",", ".")
     return f"$ {signo}{entero_txt}"
 
+
+
+
+def formatear_importes_informe(df):
+    """Convierte importes, porcentajes y kilos a texto local SOLO para mostrar.
+
+    No modifica el DataFrame original, ni los resultados del motor/exportaciones.
+    Funciona incluso cuando Pandas trae los importes como dtype object.
+    """
+    if df is None or not isinstance(df, pd.DataFrame):
+        return df
+    resultado = df.copy()
+
+    def numero_real(v):
+        if v is None or pd.isna(v):
+            return None
+        if isinstance(v, str):
+            t = v.strip().replace('$', '').replace('%', '').replace(' ', '')
+            if not t or t in ('—', '-'):
+                return None
+            # acepta números argentinos con separadores o decimales en formato Excel
+            if ',' in t:
+                t = t.replace('.', '').replace(',', '.')
+            try:
+                return float(t)
+            except ValueError:
+                return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def numero_arg(v, decimales):
+        t = f"{abs(v):,.{decimales}f}"
+        return t.replace(',', '#').replace('.', ',').replace('#', '.')
+
+    for col in resultado.columns:
+        etiqueta = str(col).strip().casefold()
+        es_porcentaje = any(k in etiqueta for k in ('cobertura', 'porcent', '%'))
+        es_importe = any(k in etiqueta for k in (
+            'costo', 'precio', 'importe', 'facturación', 'valorización',
+            'valor stock', 'valor pedido', 'valor reposición',
+        ))
+        es_kilos = ('kilos valorizados' in etiqueta or 'kilos vendidos' in etiqueta)
+        if not (es_porcentaje or es_importe or es_kilos):
+            continue
+
+        def mostrar(valor):
+            n = numero_real(valor)
+            if n is None:
+                return '—' if valor is None or (not isinstance(valor, str) and pd.isna(valor)) else str(valor)
+            if es_porcentaje:
+                return f"{numero_arg(n, 1)}%"
+            if es_importe:
+                dec = 2 if any(x in etiqueta for x in ('por kg', '/kg', 'por kilo')) else 0
+                signo = '-' if n < 0 else ''
+                return f"{signo}$ {numero_arg(n, dec)}"
+            return numero_arg(n, 3).rstrip('0').rstrip(',') if es_kilos else str(valor)
+
+        resultado[col] = resultado[col].map(mostrar).astype(str)
+    return resultado
+
+
+def _mostrar_indicadores_costos_mix(indicadores):
+    """Columnas conocidas con formato explícito, no dependiente de dtype de Pandas."""
+    if indicadores is None or indicadores.empty:
+        return indicadores
+    df = indicadores.copy()
+    columnas_obligatorias = {
+        'Costo de reposición', 'Kilos valorizados', 'Costo por kg',
+        'Cobertura productos (%)',
+    }
+    # Si el motor cambia columnas, no ocultar datos.
+    if not columnas_obligatorias.issubset(df.columns):
+        return formatear_importes_informe(df)
+    return formatear_importes_informe(df)
 
 
 def _codigo_clave(valor):
@@ -849,6 +1038,9 @@ def render_simulador_parametros(snapshot, key_prefix="sim"):
         data_path.write_bytes(snapshot["data_bytes"])
         maestro_path.write_bytes(snapshot["maestro_bytes"])
         carrito_path.write_bytes(snapshot["carrito_bytes"])
+        maestro_path = maestro_para_pedido(
+            maestro_path, tmp, st.session_state.get("omisiones_pedido_vigentes", [])
+        )
 
         with st.spinner("Simulando escenarios..."):
             for i, esc in enumerate(escenarios, start=1):
@@ -940,9 +1132,60 @@ def render_simulador_parametros(snapshot, key_prefix="sim"):
             st.dataframe(cambios_mostrar, use_container_width=True)
     except Exception as e:
         st.warning(f"No pude calcular el detalle de cambios por producto: {e}")
+@st.fragment
+def _descargas_pedido_aisladas():
+    """Fragmento independiente: descargar no reejecuta los cálculos ni el formulario."""
+    estado = st.session_state.get("pedido_descargas_labs")
+    if not estado:
+        return
+    with st.container(border=True):
+        st.subheader("Descargas del último pedido generado")
+        col_pedido, col_carrito = st.columns(2)
+        with col_pedido:
+            st.download_button(
+                "DESCARGAR PEDIDO FINAL",
+                data=estado["pedido_bytes"],
+                file_name="Pedido_Final.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="descargar_pedido_final_persistente",
+                on_click="ignore",
+            )
+        with col_carrito:
+            if estado.get("carrito_bytes") is not None:
+                st.download_button(
+                    "DESCARGAR CARRITO PARA IMPORTAR",
+                    data=estado["carrito_bytes"],
+                    file_name="Carrito_Importar.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="descargar_carrito_importacion_persistente",
+                    on_click="ignore",
+                )
+            else:
+                st.warning("No se pudo preparar el Carrito para importar.")
+        if estado.get("carrito_info"):
+            nproductos, npacks = estado["carrito_info"]
+            st.caption(
+                f"Carrito importable: {nproductos} productos · {npacks} packs. "
+                "Solo cantidades mayores a cero; código como texto y cantidad numérica."
+            )
+        if estado.get("carrito_error"):
+            st.warning(f"Error del Carrito: {estado['carrito_error']}")
+
+
 def render_generar_pedido(github):
     st.header("Generar pedido")
     st.caption("Subí Stock, Sabores y Power BI. El Maestro y el Carrito vigentes se toman automáticamente.")
+    st.caption("**Interfaz Labs: FIX-20261105-03 · descargas persistentes y formato ARS**")
+    mensaje_omision = st.session_state.pop("mensaje_omision_pedido", None)
+    if mensaje_omision:
+        st.success(mensaje_omision)
+    # Los dos archivos están disponibles antes de cualquier validación/st.stop.
+    # El fragmento evita el rerun completo al hacer clic en descargar.
+    _descargas_visibles_arriba = bool(st.session_state.get("pedido_descargas_labs"))
+    if _descargas_visibles_arriba:
+        _descargas_pedido_aisladas()
 
     if "ultimo_analisis_snapshot" in st.session_state:
         with st.expander("Simulador del último análisis", expanded=True):
@@ -1115,21 +1358,28 @@ def render_generar_pedido(github):
                 st.error(f"No se pudo calcular el costo del mix: {e}")
         if "costos_mix_actual" in st.session_state:
             indicadores, detalle_costos = st.session_state["costos_mix_actual"]
-            st.dataframe(indicadores, use_container_width=True, hide_index=True)
+            # Forzar la conversión a cadenas locales antes de enviar la tabla a Streamlit.
+            indicadores_visibles = _mostrar_indicadores_costos_mix(indicadores)
+            # Tabla de texto ya formateado: así Streamlit no puede revertir el formato
+            # a valores numéricos mediante inferencia de tipos.
+            st.dataframe(indicadores_visibles.astype(str), use_container_width=True, hide_index=True)
             st.warning("El costo total se calcula sobre productos con precio y kilos válidos. Revisá la cobertura antes de usarlo como costo total de toda la sucursal.")
             with st.expander("Auditar costos por producto y faltantes"):
-                st.dataframe(detalle_costos.drop(columns=["clave"], errors="ignore"), use_container_width=True, hide_index=True)
+                st.dataframe(formatear_importes_informe(detalle_costos.drop(columns=["clave"], errors="ignore")), use_container_width=True, hide_index=True)
             st.download_button("DESCARGAR DETALLE DE COSTOS (CSV)",detalle_costos.to_csv(index=False).encode("utf-8-sig"),file_name="Costos_segun_mix.csv",mime="text/csv",key="desc_costos_mix_240")
 
         st.success("✅ Todo listo para generar el pedido.")
         if st.button("ANALIZAR Y GENERAR PEDIDO", type="primary", use_container_width=True):
             output = tmp / "Pedido_Final.xlsx"
             try:
+                omisiones_vigentes = leer_omisiones_pedido(github)
+                st.session_state["omisiones_pedido_vigentes"] = omisiones_vigentes
+                maestro_pedido = maestro_para_pedido(maestro_path, tmp, omisiones_vigentes)
                 result = procesar_archivos(
                     stock_file=paths["stock"],
                     sabores_file=paths["sabores"],
                     data_file=paths["data"],
-                    maestro_file=maestro_path,
+                    maestro_file=maestro_pedido,
                     output_file=output,
                     overrides={
                         "Semanas objetivo": semanas_objetivo,
@@ -1142,8 +1392,6 @@ def render_generar_pedido(github):
                 sin_clasificar = result["sin_clasificar"]
                 posibles_faltantes = result.get("posibles_faltantes")
                 stock_negativo = result.get("stock_negativo")
-                st.success("Pedido analizado correctamente.")
-                render_diagnostico_pedido(result)
 
                 st.session_state["ultimo_analisis_snapshot"] = {
                     "stock_bytes": stock_file.getvalue(),
@@ -1158,73 +1406,81 @@ def render_generar_pedido(github):
                     },
                 }
 
-                render_simulador_parametros(st.session_state["ultimo_analisis_snapshot"], key_prefix="sim_2")
-
-                st.markdown("---")
-                st.header("Resumen final")
-                m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric("Productos en pedido", len(pedido))
-                m2.metric("Stock negativo", len(stock_negativo) if stock_negativo is not None else 0)
-                m3.metric("Sin clasificar", len(sin_clasificar))
-                m4.metric("Posibles faltantes", len(posibles_faltantes) if posibles_faltantes is not None else 0)
-                m5.metric("Packs sugeridos", int(pedido["Packs a Comprar"].fillna(0).sum()))
-                v1, v2 = st.columns(2)
-                v1.metric("Valor stock actual", formato_moneda_ar(result.get("valor_stock_total", 0)))
-                v2.metric("Valor pedido sugerido", formato_moneda_ar(result.get("valor_pedido_total", 0)))
-                if result.get("valorizacion_categoria") is not None:
-                    with st.expander("Ver valorización por categoría", expanded=False):
-                        df_categoria = result["valorizacion_categoria"].copy()
-                        if "Valor Stock Actual" in df_categoria.columns:
-                            df_categoria["Valor Stock Actual"] = df_categoria["Valor Stock Actual"].apply(formato_moneda_ar)
-                        st.dataframe(df_categoria, use_container_width=True)
-                if result.get("valorizacion_producto") is not None:
-                    with st.expander("Ver valorización por producto", expanded=False):
-                        st.dataframe(result["valorizacion_producto"], use_container_width=True)
-                if stock_negativo is not None and len(stock_negativo) > 0:
-                    st.error("⚠️ Se detectaron productos con stock negativo.")
-                if posibles_faltantes is not None and len(posibles_faltantes) > 0:
-                    st.warning("Se detectaron posibles faltantes.")
-                if len(sin_clasificar) > 0:
-                    st.warning("Hay productos sin clasificar.")
-                st.download_button(
-                    "DESCARGAR PEDIDO FINAL",
-                    data=output.read_bytes(),
-                    file_name="Pedido_Final.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+                # Conservar los dos archivos antes de que Streamlit vuelva a ejecutar la página.
+                pedido_bytes = output.read_bytes()
+                carrito_bytes = None
+                carrito_error = None
+                carrito_info = None
                 try:
-                    carrito_importable, cantidad_productos, total_packs = generar_carrito_importacion(
-                        pedido, carrito_path
-                    )
-                    st.download_button(
-                        "DESCARGAR CARRITO PARA IMPORTAR",
-                        data=carrito_importable,
-                        file_name="Carrito_Importar.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                        key="descargar_carrito_importacion",
-                    )
-                    st.caption(
-                        f"Carrito importable: {cantidad_productos} productos · {total_packs} packs. "
-                        "Solo productos con cantidad > 0; todas las columnas originales. Código como texto y cantidad numérica."
-                    )
+                    carrito_bytes, cantidad_productos, total_packs = generar_carrito_importacion(pedido, carrito_path)
+                    carrito_info = (cantidad_productos, total_packs)
                 except Exception as exc_importacion:
-                    st.warning(f"No se pudo preparar el carrito para importar: {exc_importacion}")
-                with st.expander("Ver vista previa del pedido", expanded=False):
-                    st.dataframe(pedido.head(100), use_container_width=True)
-                if stock_negativo is not None and len(stock_negativo) > 0:
-                    with st.expander("Ver stock negativo", expanded=True):
-                        st.dataframe(stock_negativo, use_container_width=True)
-                if posibles_faltantes is not None and len(posibles_faltantes) > 0:
-                    with st.expander("Ver posibles faltantes", expanded=True):
-                        st.dataframe(posibles_faltantes, use_container_width=True)
-                if len(sin_clasificar) > 0:
-                    with st.expander("Ver productos sin clasificar", expanded=True):
-                        st.dataframe(sin_clasificar, use_container_width=True)
+                    carrito_error = str(exc_importacion)
+                st.session_state["pedido_descargas_labs"] = {
+                    "pedido_bytes": pedido_bytes,
+                    "carrito_bytes": carrito_bytes,
+                    "carrito_error": carrito_error,
+                    "carrito_info": carrito_info,
+                    "result": result,
+                }
+                # No forzar rerun: mostrarlos inmediatamente en esta misma ejecución.
+                st.success("Los dos archivos del pedido quedaron preparados para descargar.")
             except Exception as e:
                 st.error("Ocurrió un error al generar el pedido.")
                 st.exception(e)
+
+        # Fuera del botón de análisis: los botones de descarga permanecen visibles
+        # después de cualquier rerun causado por una descarga.
+        estado_pedido = st.session_state.get("pedido_descargas_labs")
+        if estado_pedido:
+            if not _descargas_visibles_arriba:
+                _descargas_pedido_aisladas()
+            result = estado_pedido["result"]
+            pedido = result["pedido"]
+            sin_clasificar = result["sin_clasificar"]
+            posibles_faltantes = result.get("posibles_faltantes")
+            stock_negativo = result.get("stock_negativo")
+            st.success("Pedido analizado correctamente.")
+            render_diagnostico_pedido(result)
+            st.markdown("---")
+            st.header("Resumen final")
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Productos en pedido", len(pedido))
+            m2.metric("Stock negativo", len(stock_negativo) if stock_negativo is not None else 0)
+            m3.metric("Sin clasificar", len(sin_clasificar))
+            m4.metric("Posibles faltantes", len(posibles_faltantes) if posibles_faltantes is not None else 0)
+            m5.metric("Packs sugeridos", int(pedido["Packs a Comprar"].fillna(0).sum()))
+            v1, v2 = st.columns(2)
+            v1.metric("Valor stock actual", formato_moneda_ar(result.get("valor_stock_total", 0)))
+            v2.metric("Valor pedido sugerido", formato_moneda_ar(result.get("valor_pedido_total", 0)))
+            if result.get("valorizacion_categoria") is not None:
+                with st.expander("Ver valorización por categoría", expanded=False):
+                    st.dataframe(formatear_importes_informe(result["valorizacion_categoria"]), use_container_width=True)
+            if result.get("valorizacion_producto") is not None:
+                with st.expander("Ver valorización por producto", expanded=False):
+                    st.dataframe(formatear_importes_informe(result["valorizacion_producto"]), use_container_width=True)
+            if stock_negativo is not None and len(stock_negativo) > 0:
+                st.error("⚠️ Se detectaron productos con stock negativo.")
+            if posibles_faltantes is not None and len(posibles_faltantes) > 0:
+                st.warning("Se detectaron posibles faltantes.")
+            if len(sin_clasificar) > 0:
+                st.warning("Hay productos sin clasificar.")
+
+            with st.expander("Ver vista previa del pedido", expanded=False):
+                st.dataframe(formatear_importes_informe(pedido.head(100)), use_container_width=True)
+            if stock_negativo is not None and len(stock_negativo) > 0:
+                with st.expander("Ver stock negativo", expanded=True):
+                    st.dataframe(formatear_importes_informe(stock_negativo), use_container_width=True)
+            if posibles_faltantes is not None and len(posibles_faltantes) > 0:
+                with st.expander("Ver posibles faltantes", expanded=True):
+                    st.dataframe(formatear_importes_informe(posibles_faltantes), use_container_width=True)
+                    _control_omitir_faltantes(github, posibles_faltantes)
+            else:
+                with st.expander("Administrar omisiones de futuros pedidos", expanded=False):
+                    _control_omitir_faltantes(github, None)
+            if len(sin_clasificar) > 0:
+                with st.expander("Ver productos sin clasificar", expanded=True):
+                    st.dataframe(sin_clasificar, use_container_width=True)
 
 
 
