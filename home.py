@@ -153,7 +153,7 @@ def mostrar_historial_stock(github):
             "Valorización del stock": df["valor_stock"].apply(formato_moneda_ar),
             "Unidades equivalentes": df["cantidad_unidades"].apply(lambda v: f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if pd.notna(v) else "—"),
         })
-        st.dataframe(formatear_importes_informe(mostrar), hide_index=True, use_container_width=True)
+        st.dataframe(mostrar, hide_index=True, use_container_width=True)
 
         st.markdown("#### Evolución histórica del stock")
         graficos = df.dropna(subset=["fecha_orden"]).sort_values("fecha_orden", ascending=True)
@@ -216,69 +216,47 @@ def formato_moneda_ar(valor):
 
 
 
+
 def formatear_importes_informe(df):
-    """Formatea importes y porcentajes para mostrar, sin alterar datos ni exportaciones."""
+    """Formato argentino de importes y porcentajes, solo para pantalla."""
     if df is None or not isinstance(df, pd.DataFrame):
         return df
-
     resultado = df.copy()
 
-    def _serie_numerica(serie):
-        if pd.api.types.is_numeric_dtype(serie):
-            return serie
-        limpia = (
-            serie.astype(str)
-            .str.replace("$", "", regex=False)
-            .str.replace("%", "", regex=False)
-            .str.replace(".", "", regex=False)
-            .str.replace(",", ".", regex=False)
-            .str.strip()
-        )
-        return pd.to_numeric(limpia, errors="coerce")
-
-    def _formato_pesos(valor, decimales=False):
-        if pd.isna(valor):
+    def pesos(v, dos_decimales=False):
+        if pd.isna(v):
             return "—"
-        valor = float(valor)
-        if decimales:
-            texto = f"{abs(valor):,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+        n = float(v)
+        if dos_decimales:
+            texto = f"{abs(n):,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
         else:
-            texto = f"{abs(valor):,.0f}".replace(",", ".")
-        return f"{'-' if valor < 0 else ''}$ {texto}"
+            texto = f"{abs(n):,.0f}".replace(",", ".")
+        return f"{'-' if n < 0 else ''}$ {texto}"
 
-    def _formato_porcentaje(valor):
-        if pd.isna(valor):
+    def porcentaje(v):
+        if pd.isna(v):
             return "—"
-        valor = float(valor)
-        if abs(valor - round(valor)) < 1e-9:
-            texto = f"{int(round(valor))}"
-        else:
-            texto = f"{valor:,.1f}".replace(",", "_").replace(".", ",").replace("_", ".")
-        return f"{texto}%"
+        n = float(v)
+        txt = f"{n:,.1f}".replace(",", "_").replace(".", ",").replace("_", ".")
+        return f"{txt}%"
 
-    for columna in resultado.columns:
-        etiqueta = str(columna).strip().lower()
-        serie_num = _serie_numerica(resultado[columna])
-        if serie_num.notna().sum() == 0:
+    def numero(v):
+        if pd.isna(v):
+            return "—"
+        txt = f"{float(v):,.3f}".rstrip("0").rstrip(".")
+        return txt.replace(",", "_").replace(".", ",").replace("_", ".")
+
+    for c in resultado.columns:
+        label = str(c).casefold()
+        if not pd.api.types.is_numeric_dtype(resultado[c]):
             continue
-
-        es_porcentaje = any(x in etiqueta for x in ('cobertura', 'porcent', '%'))
-        es_pesos = any(x in etiqueta for x in (
-            'valor stock', 'valor pedido', 'valor actual', 'valor estimado',
-            'dif. valor', 'costo', 'precio', 'importe', 'facturación',
-            'valorización', 'valor reposición', 'valor de reposición',
-        ))
-
-        if es_porcentaje and not es_pesos:
-            resultado[columna] = serie_num.map(_formato_porcentaje)
-            continue
-
-        if not es_pesos:
-            continue
-
-        con_decimales = ('por kg' in etiqueta or '/kg' in etiqueta or 'por kilo' in etiqueta)
-        resultado[columna] = serie_num.map(lambda x: _formato_pesos(x, decimales=con_decimales))
-
+        if any(x in label for x in ('cobertura', 'porcent', '%')):
+            resultado[c] = resultado[c].map(porcentaje)
+        elif any(x in label for x in ('costo', 'precio', 'importe', 'facturación', 'valorización', 'valor stock', 'valor pedido', 'valor reposición')):
+            dec = any(x in label for x in ('por kg', '/kg', 'por kilo'))
+            resultado[c] = resultado[c].map(lambda v: pesos(v, dec))
+        elif 'kilos valorizados' in label or 'kilos vendidos' in label:
+            resultado[c] = resultado[c].map(numero)
     return resultado
 
 
@@ -681,19 +659,19 @@ def subir_archivo_validado(label, uploader_label, destino, validator, filename, 
                         if len(diff["agregados"]) == 0:
                             st.success("No hay productos agregados.")
                         else:
-                            st.dataframe(formatear_importes_informe(diff["agregados"]), use_container_width=True)
+                            st.dataframe(diff["agregados"], use_container_width=True)
 
                     with tabs[1]:
                         if len(diff["eliminados"]) == 0:
                             st.success("No hay productos eliminados.")
                         else:
-                            st.dataframe(formatear_importes_informe(diff["eliminados"]), use_container_width=True)
+                            st.dataframe(diff["eliminados"], use_container_width=True)
 
                     with tabs[2]:
                         if len(diff["cambios"]) == 0:
                             st.success("No hay cambios en productos existentes.")
                         else:
-                            st.dataframe(formatear_importes_informe(diff["cambios"]), use_container_width=True)
+                            st.dataframe(diff["cambios"], use_container_width=True)
 
                 except Exception as e:
                     st.error("No pude comparar el Maestro nuevo contra el vigente.")
@@ -790,7 +768,7 @@ def render_diagnostico_pedido(result):
         top_repo = top_repo.sort_values("__packs", ascending=False).head(20)
         cols = ["Grupo", "Producto", "Stock", ventas_col, "Venta Semanal", "Semanas Stock", "Packs a Comprar", "Valor Pedido Sugerido", "Código Compra", "Producto Compra"]
         cols = [c for c in cols if c and c in top_repo.columns]
-        st.dataframe(formatear_importes_informe(top_repo[cols]), use_container_width=True)
+        st.dataframe(top_repo[cols], use_container_width=True)
 
     with tabs[1]:
         cobertura = pedido.copy()
@@ -798,7 +776,7 @@ def render_diagnostico_pedido(result):
         cobertura = cobertura[cobertura["__semanas"].notna()].sort_values("__semanas", ascending=True).head(20)
         cols = ["Grupo", "Producto", "Stock", ventas_col, "Venta Semanal", "Semanas Stock", "Packs a Comprar", "Valor Pedido Sugerido"]
         cols = [c for c in cols if c and c in cobertura.columns]
-        st.dataframe(formatear_importes_informe(cobertura[cols]), use_container_width=True)
+        st.dataframe(cobertura[cols], use_container_width=True)
 
     with tabs[2]:
         if len(ventas_sin_stock) == 0:
@@ -806,7 +784,7 @@ def render_diagnostico_pedido(result):
         else:
             cols = ["Grupo", "Producto", "Stock", ventas_col, "Venta Semanal", "Packs a Comprar", "Código Compra", "Producto Compra"]
             cols = [c for c in cols if c and c in ventas_sin_stock.columns]
-            st.dataframe(formatear_importes_informe(ventas_sin_stock[cols]), use_container_width=True)
+            st.dataframe(ventas_sin_stock[cols], use_container_width=True)
 
     with tabs[3]:
         if len(stock_sin_ventas) == 0:
@@ -814,24 +792,24 @@ def render_diagnostico_pedido(result):
         else:
             cols = ["Grupo", "Producto", "Stock", ventas_col, "Semanas Stock", "Observación", "Código Compra", "Producto Compra"]
             cols = [c for c in cols if c and c in stock_sin_ventas.columns]
-            st.dataframe(formatear_importes_informe(stock_sin_ventas[cols].head(100)), use_container_width=True)
+            st.dataframe(stock_sin_ventas[cols].head(100), use_container_width=True)
 
     with tabs[4]:
         hay_alertas = False
         if stock_negativo is not None and len(stock_negativo) > 0:
             hay_alertas = True
             with st.expander("Stock negativo", expanded=True):
-                st.dataframe(formatear_importes_informe(stock_negativo), use_container_width=True)
+                st.dataframe(stock_negativo, use_container_width=True)
 
         if posibles_faltantes is not None and len(posibles_faltantes) > 0:
             hay_alertas = True
             with st.expander("Posibles faltantes", expanded=True):
-                st.dataframe(formatear_importes_informe(posibles_faltantes), use_container_width=True)
+                st.dataframe(posibles_faltantes, use_container_width=True)
 
         if sin_clasificar is not None and len(sin_clasificar) > 0:
             hay_alertas = True
             with st.expander("Sin clasificar", expanded=True):
-                st.dataframe(formatear_importes_informe(sin_clasificar), use_container_width=True)
+                st.dataframe(sin_clasificar, use_container_width=True)
 
         if not hay_alertas:
             st.success("No se detectaron alertas principales.")
@@ -963,7 +941,7 @@ def render_simulador_parametros(snapshot, key_prefix="sim"):
     for col in ["Valor pedido", "Valor stock", "Dif. valor pedido vs Actual"]:
         resumen_mostrar[col] = resumen_mostrar[col].apply(formato_moneda_ar)
 
-    st.dataframe(formatear_importes_informe(resumen_mostrar), use_container_width=True)
+    st.dataframe(resumen_mostrar, use_container_width=True)
 
     col_a, col_b, col_c = st.columns(3)
 
@@ -1003,7 +981,7 @@ def render_simulador_parametros(snapshot, key_prefix="sim"):
             cambios_mostrar["Valor Actual"] = cambios_mostrar["Valor Actual"].apply(formato_moneda_ar)
             cambios_mostrar["Dif. valor"] = cambios_mostrar["Dif. valor"].apply(formato_moneda_ar)
 
-            st.dataframe(formatear_importes_informe(cambios_mostrar), use_container_width=True)
+            st.dataframe(cambios_mostrar, use_container_width=True)
     except Exception as e:
         st.warning(f"No pude calcular el detalle de cambios por producto: {e}")
 def render_generar_pedido(github):
@@ -1130,7 +1108,7 @@ def render_generar_pedido(github):
                             df_categoria = result_stock["categoria"].copy()
                             if "Valor Stock Actual" in df_categoria.columns:
                                 df_categoria["Valor Stock Actual"] = df_categoria["Valor Stock Actual"].apply(formato_moneda_ar)
-                            st.dataframe(formatear_importes_informe(df_categoria), use_container_width=True)
+                            st.dataframe(df_categoria, use_container_width=True)
 
                     sabores_stock, composicion_general = _composicion_stock_desde_carrito(
                         result_stock.get("detalle"),
@@ -1208,8 +1186,6 @@ def render_generar_pedido(github):
                 sin_clasificar = result["sin_clasificar"]
                 posibles_faltantes = result.get("posibles_faltantes")
                 stock_negativo = result.get("stock_negativo")
-                st.success("Pedido analizado correctamente.")
-                render_diagnostico_pedido(result)
 
                 st.session_state["ultimo_analisis_snapshot"] = {
                     "stock_bytes": stock_file.getvalue(),
@@ -1224,73 +1200,97 @@ def render_generar_pedido(github):
                     },
                 }
 
-                render_simulador_parametros(st.session_state["ultimo_analisis_snapshot"], key_prefix="sim_2")
-
-                st.markdown("---")
-                st.header("Resumen final")
-                m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric("Productos en pedido", len(pedido))
-                m2.metric("Stock negativo", len(stock_negativo) if stock_negativo is not None else 0)
-                m3.metric("Sin clasificar", len(sin_clasificar))
-                m4.metric("Posibles faltantes", len(posibles_faltantes) if posibles_faltantes is not None else 0)
-                m5.metric("Packs sugeridos", int(pedido["Packs a Comprar"].fillna(0).sum()))
-                v1, v2 = st.columns(2)
-                v1.metric("Valor stock actual", formato_moneda_ar(result.get("valor_stock_total", 0)))
-                v2.metric("Valor pedido sugerido", formato_moneda_ar(result.get("valor_pedido_total", 0)))
-                if result.get("valorizacion_categoria") is not None:
-                    with st.expander("Ver valorización por categoría", expanded=False):
-                        df_categoria = result["valorizacion_categoria"].copy()
-                        if "Valor Stock Actual" in df_categoria.columns:
-                            df_categoria["Valor Stock Actual"] = df_categoria["Valor Stock Actual"].apply(formato_moneda_ar)
-                        st.dataframe(formatear_importes_informe(df_categoria), use_container_width=True)
-                if result.get("valorizacion_producto") is not None:
-                    with st.expander("Ver valorización por producto", expanded=False):
-                        st.dataframe(formatear_importes_informe(result["valorizacion_producto"]), use_container_width=True)
-                if stock_negativo is not None and len(stock_negativo) > 0:
-                    st.error("⚠️ Se detectaron productos con stock negativo.")
-                if posibles_faltantes is not None and len(posibles_faltantes) > 0:
-                    st.warning("Se detectaron posibles faltantes.")
-                if len(sin_clasificar) > 0:
-                    st.warning("Hay productos sin clasificar.")
-                st.download_button(
-                    "DESCARGAR PEDIDO FINAL",
-                    data=output.read_bytes(),
-                    file_name="Pedido_Final.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+                # Conservar los dos archivos antes de que Streamlit vuelva a ejecutar la página.
+                pedido_bytes = output.read_bytes()
+                carrito_bytes = None
+                carrito_error = None
+                carrito_info = None
                 try:
-                    carrito_importable, cantidad_productos, total_packs = generar_carrito_importacion(
-                        pedido, carrito_path
-                    )
-                    st.download_button(
-                        "DESCARGAR CARRITO PARA IMPORTAR",
-                        data=carrito_importable,
-                        file_name="Carrito_Importar.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                        key="descargar_carrito_importacion",
-                    )
-                    st.caption(
-                        f"Carrito importable: {cantidad_productos} productos · {total_packs} packs. "
-                        "Solo productos con cantidad > 0; todas las columnas originales. Código como texto y cantidad numérica."
-                    )
+                    carrito_bytes, cantidad_productos, total_packs = generar_carrito_importacion(pedido, carrito_path)
+                    carrito_info = (cantidad_productos, total_packs)
                 except Exception as exc_importacion:
-                    st.warning(f"No se pudo preparar el carrito para importar: {exc_importacion}")
-                with st.expander("Ver vista previa del pedido", expanded=False):
-                    st.dataframe(formatear_importes_informe(pedido.head(100)), use_container_width=True)
-                if stock_negativo is not None and len(stock_negativo) > 0:
-                    with st.expander("Ver stock negativo", expanded=True):
-                        st.dataframe(formatear_importes_informe(stock_negativo), use_container_width=True)
-                if posibles_faltantes is not None and len(posibles_faltantes) > 0:
-                    with st.expander("Ver posibles faltantes", expanded=True):
-                        st.dataframe(formatear_importes_informe(posibles_faltantes), use_container_width=True)
-                if len(sin_clasificar) > 0:
-                    with st.expander("Ver productos sin clasificar", expanded=True):
-                        st.dataframe(formatear_importes_informe(sin_clasificar), use_container_width=True)
+                    carrito_error = str(exc_importacion)
+                st.session_state["pedido_descargas_labs"] = {
+                    "pedido_bytes": pedido_bytes,
+                    "carrito_bytes": carrito_bytes,
+                    "carrito_error": carrito_error,
+                    "carrito_info": carrito_info,
+                    "result": result,
+                }
             except Exception as e:
                 st.error("Ocurrió un error al generar el pedido.")
                 st.exception(e)
+
+        # Fuera del botón de análisis: los botones de descarga permanecen visibles
+        # después de cualquier rerun causado por una descarga.
+        estado_pedido = st.session_state.get("pedido_descargas_labs")
+        if estado_pedido:
+            result = estado_pedido["result"]
+            pedido = result["pedido"]
+            sin_clasificar = result["sin_clasificar"]
+            posibles_faltantes = result.get("posibles_faltantes")
+            stock_negativo = result.get("stock_negativo")
+            st.success("Pedido analizado correctamente.")
+            render_diagnostico_pedido(result)
+            st.markdown("---")
+            st.header("Resumen final")
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Productos en pedido", len(pedido))
+            m2.metric("Stock negativo", len(stock_negativo) if stock_negativo is not None else 0)
+            m3.metric("Sin clasificar", len(sin_clasificar))
+            m4.metric("Posibles faltantes", len(posibles_faltantes) if posibles_faltantes is not None else 0)
+            m5.metric("Packs sugeridos", int(pedido["Packs a Comprar"].fillna(0).sum()))
+            v1, v2 = st.columns(2)
+            v1.metric("Valor stock actual", formato_moneda_ar(result.get("valor_stock_total", 0)))
+            v2.metric("Valor pedido sugerido", formato_moneda_ar(result.get("valor_pedido_total", 0)))
+            if result.get("valorizacion_categoria") is not None:
+                with st.expander("Ver valorización por categoría", expanded=False):
+                    st.dataframe(formatear_importes_informe(result["valorizacion_categoria"]), use_container_width=True)
+            if result.get("valorizacion_producto") is not None:
+                with st.expander("Ver valorización por producto", expanded=False):
+                    st.dataframe(formatear_importes_informe(result["valorizacion_producto"]), use_container_width=True)
+            if stock_negativo is not None and len(stock_negativo) > 0:
+                st.error("⚠️ Se detectaron productos con stock negativo.")
+            if posibles_faltantes is not None and len(posibles_faltantes) > 0:
+                st.warning("Se detectaron posibles faltantes.")
+            if len(sin_clasificar) > 0:
+                st.warning("Hay productos sin clasificar.")
+
+            st.download_button(
+                "DESCARGAR PEDIDO FINAL",
+                data=estado_pedido["pedido_bytes"],
+                file_name="Pedido_Final.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="descargar_pedido_final_persistente",
+                on_click="ignore",
+            )
+            if estado_pedido["carrito_bytes"] is not None:
+                st.download_button(
+                    "DESCARGAR CARRITO PARA IMPORTAR",
+                    data=estado_pedido["carrito_bytes"],
+                    file_name="Carrito_Importar.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="descargar_carrito_importacion_persistente",
+                    on_click="ignore",
+                )
+                nproductos, npacks = estado_pedido["carrito_info"]
+                st.caption(f"Carrito importable: {nproductos} productos · {npacks} packs. "
+                           "Solo cantidades mayores a cero; código como texto y cantidad numérica.")
+            elif estado_pedido["carrito_error"]:
+                st.warning(f"No se pudo preparar el Carrito: {estado_pedido['carrito_error']}")
+            with st.expander("Ver vista previa del pedido", expanded=False):
+                st.dataframe(formatear_importes_informe(pedido.head(100)), use_container_width=True)
+            if stock_negativo is not None and len(stock_negativo) > 0:
+                with st.expander("Ver stock negativo", expanded=True):
+                    st.dataframe(formatear_importes_informe(stock_negativo), use_container_width=True)
+            if posibles_faltantes is not None and len(posibles_faltantes) > 0:
+                with st.expander("Ver posibles faltantes", expanded=True):
+                    st.dataframe(formatear_importes_informe(posibles_faltantes), use_container_width=True)
+            if len(sin_clasificar) > 0:
+                with st.expander("Ver productos sin clasificar", expanded=True):
+                    st.dataframe(sin_clasificar, use_container_width=True)
 
 
 
@@ -1397,11 +1397,11 @@ def render_historial_maestro(github):
                             with st.expander("Ver cambios de restauración", expanded=False):
                                 tab_a, tab_b, tab_c = st.tabs(["Agregados", "Eliminados", "Cambios"])
                                 with tab_a:
-                                    st.dataframe(formatear_importes_informe(diff["agregados"]), use_container_width=True)
+                                    st.dataframe(diff["agregados"], use_container_width=True)
                                 with tab_b:
-                                    st.dataframe(formatear_importes_informe(diff["eliminados"]), use_container_width=True)
+                                    st.dataframe(diff["eliminados"], use_container_width=True)
                                 with tab_c:
-                                    st.dataframe(formatear_importes_informe(diff["cambios"]), use_container_width=True)
+                                    st.dataframe(diff["cambios"], use_container_width=True)
                         except Exception as e:
                             st.warning(f"No pude comparar antes de restaurar: {e}")
 
