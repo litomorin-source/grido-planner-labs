@@ -847,6 +847,28 @@ def subir_archivo_validado(label, uploader_label, destino, validator, filename, 
                 st.error(result["message"])
                 st.code(result.get("details", ""))
 
+def aplicar_formato_pesos_excel_pedido(ruta_excel):
+    """Formato visual en Excel: no convierte importes a texto ni altera cálculos."""
+    libro = load_workbook(ruta_excel)
+    columnas_pesos = {
+        "Valor Pedido Sugerido", "Valor Stock Actual", "Precio Pack",
+        "Costo de reposición", "Costo", "Precio", "Importe",
+    }
+    formato = '"$ "#,##0;[Red]"-$ "#,##0;"$ "0'
+    for hoja in libro.worksheets:
+        # El bloque Carrito tiene advertencias al principio y encabezados más abajo.
+        for fila in hoja.iter_rows():
+            for celda in fila:
+                if not isinstance(celda.value, str) or celda.value.strip() not in columnas_pesos:
+                    continue
+                columna = celda.column
+                for siguiente in hoja.iter_rows(min_row=celda.row + 1, min_col=columna, max_col=columna):
+                    valor = siguiente[0]
+                    if isinstance(valor.value, (int, float)) and not isinstance(valor.value, bool):
+                        valor.number_format = formato
+    libro.save(ruta_excel)
+
+
 def _ventas_col(pedido):
     for col in pedido.columns:
         if str(col).startswith("Ventas "):
@@ -913,7 +935,7 @@ def render_diagnostico_pedido(result):
         top_repo = top_repo.sort_values("__packs", ascending=False).head(20)
         cols = ["Grupo", "Producto", "Stock", ventas_col, "Venta Semanal", "Semanas Stock", "Packs a Comprar", "Valor Pedido Sugerido", "Código Compra", "Producto Compra"]
         cols = [c for c in cols if c and c in top_repo.columns]
-        st.dataframe(top_repo[cols], use_container_width=True)
+        st.dataframe(formatear_importes_informe(top_repo[cols]), use_container_width=True)
 
     with tabs[1]:
         cobertura = pedido.copy()
@@ -921,7 +943,7 @@ def render_diagnostico_pedido(result):
         cobertura = cobertura[cobertura["__semanas"].notna()].sort_values("__semanas", ascending=True).head(20)
         cols = ["Grupo", "Producto", "Stock", ventas_col, "Venta Semanal", "Semanas Stock", "Packs a Comprar", "Valor Pedido Sugerido"]
         cols = [c for c in cols if c and c in cobertura.columns]
-        st.dataframe(cobertura[cols], use_container_width=True)
+        st.dataframe(formatear_importes_informe(cobertura[cols]), use_container_width=True)
 
     with tabs[2]:
         if len(ventas_sin_stock) == 0:
@@ -1405,6 +1427,9 @@ def render_generar_pedido(github):
                         "Días analizados": dias_analizados,
                     },
                 }
+
+                # Aplicar solo formato visual al Excel generado; importes siguen siendo numéricos.
+                aplicar_formato_pesos_excel_pedido(output)
 
                 # Conservar los dos archivos antes de que Streamlit vuelva a ejecutar la página.
                 pedido_bytes = output.read_bytes()
