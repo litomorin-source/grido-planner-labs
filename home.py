@@ -218,46 +218,78 @@ def formato_moneda_ar(valor):
 
 
 def formatear_importes_informe(df):
-    """Formato argentino de importes y porcentajes, solo para pantalla."""
+    """Convierte importes, porcentajes y kilos a texto local SOLO para mostrar.
+
+    No modifica el DataFrame original, ni los resultados del motor/exportaciones.
+    Funciona incluso cuando Pandas trae los importes como dtype object.
+    """
     if df is None or not isinstance(df, pd.DataFrame):
         return df
     resultado = df.copy()
 
-    def pesos(v, dos_decimales=False):
-        if pd.isna(v):
-            return "—"
-        n = float(v)
-        if dos_decimales:
-            texto = f"{abs(n):,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
-        else:
-            texto = f"{abs(n):,.0f}".replace(",", ".")
-        return f"{'-' if n < 0 else ''}$ {texto}"
+    def numero_real(v):
+        if v is None or pd.isna(v):
+            return None
+        if isinstance(v, str):
+            t = v.strip().replace('$', '').replace('%', '').replace(' ', '')
+            if not t or t in ('—', '-'):
+                return None
+            # acepta números argentinos con separadores o decimales en formato Excel
+            if ',' in t:
+                t = t.replace('.', '').replace(',', '.')
+            try:
+                return float(t)
+            except ValueError:
+                return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
 
-    def porcentaje(v):
-        if pd.isna(v):
-            return "—"
-        n = float(v)
-        txt = f"{n:,.1f}".replace(",", "_").replace(".", ",").replace("_", ".")
-        return f"{txt}%"
+    def numero_arg(v, decimales):
+        t = f"{abs(v):,.{decimales}f}"
+        return t.replace(',', '#').replace('.', ',').replace('#', '.')
 
-    def numero(v):
-        if pd.isna(v):
-            return "—"
-        txt = f"{float(v):,.3f}".rstrip("0").rstrip(".")
-        return txt.replace(",", "_").replace(".", ",").replace("_", ".")
-
-    for c in resultado.columns:
-        label = str(c).casefold()
-        if not pd.api.types.is_numeric_dtype(resultado[c]):
+    for col in resultado.columns:
+        etiqueta = str(col).strip().casefold()
+        es_porcentaje = any(k in etiqueta for k in ('cobertura', 'porcent', '%'))
+        es_importe = any(k in etiqueta for k in (
+            'costo', 'precio', 'importe', 'facturación', 'valorización',
+            'valor stock', 'valor pedido', 'valor reposición',
+        ))
+        es_kilos = ('kilos valorizados' in etiqueta or 'kilos vendidos' in etiqueta)
+        if not (es_porcentaje or es_importe or es_kilos):
             continue
-        if any(x in label for x in ('cobertura', 'porcent', '%')):
-            resultado[c] = resultado[c].map(porcentaje)
-        elif any(x in label for x in ('costo', 'precio', 'importe', 'facturación', 'valorización', 'valor stock', 'valor pedido', 'valor reposición')):
-            dec = any(x in label for x in ('por kg', '/kg', 'por kilo'))
-            resultado[c] = resultado[c].map(lambda v: pesos(v, dec))
-        elif 'kilos valorizados' in label or 'kilos vendidos' in label:
-            resultado[c] = resultado[c].map(numero)
+
+        def mostrar(valor):
+            n = numero_real(valor)
+            if n is None:
+                return '—' if valor is None or (not isinstance(valor, str) and pd.isna(valor)) else str(valor)
+            if es_porcentaje:
+                return f"{numero_arg(n, 1)}%"
+            if es_importe:
+                dec = 2 if any(x in etiqueta for x in ('por kg', '/kg', 'por kilo')) else 0
+                signo = '-' if n < 0 else ''
+                return f"{signo}$ {numero_arg(n, dec)}"
+            return numero_arg(n, 3).rstrip('0').rstrip(',') if es_kilos else str(valor)
+
+        resultado[col] = resultado[col].map(mostrar).astype(str)
     return resultado
+
+
+def _mostrar_indicadores_costos_mix(indicadores):
+    """Columnas conocidas con formato explícito, no dependiente de dtype de Pandas."""
+    if indicadores is None or indicadores.empty:
+        return indicadores
+    df = indicadores.copy()
+    columnas_obligatorias = {
+        'Costo de reposición', 'Kilos valorizados', 'Costo por kg',
+        'Cobertura productos (%)',
+    }
+    # Si el motor cambia columnas, no ocultar datos.
+    if not columnas_obligatorias.issubset(df.columns):
+        return formatear_importes_informe(df)
+    return formatear_importes_informe(df)
 
 
 def _codigo_clave(valor):
@@ -984,9 +1016,54 @@ def render_simulador_parametros(snapshot, key_prefix="sim"):
             st.dataframe(cambios_mostrar, use_container_width=True)
     except Exception as e:
         st.warning(f"No pude calcular el detalle de cambios por producto: {e}")
+@st.fragment
+def _descargas_pedido_aisladas():
+    """Fragmento independiente: descargar no reejecuta los cálculos ni el formulario."""
+    estado = st.session_state.get("pedido_descargas_labs")
+    if not estado:
+        return
+    with st.container(border=True):
+        st.subheader("Descargas del último pedido generado")
+        col_pedido, col_carrito = st.columns(2)
+        with col_pedido:
+            st.download_button(
+                "DESCARGAR PEDIDO FINAL",
+                data=estado["pedido_bytes"],
+                file_name="Pedido_Final.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="descargar_pedido_final_persistente",
+                on_click="ignore",
+            )
+        with col_carrito:
+            if estado.get("carrito_bytes") is not None:
+                st.download_button(
+                    "DESCARGAR CARRITO PARA IMPORTAR",
+                    data=estado["carrito_bytes"],
+                    file_name="Carrito_Importar.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="descargar_carrito_importacion_persistente",
+                    on_click="ignore",
+                )
+            else:
+                st.warning("No se pudo preparar el Carrito para importar.")
+        if estado.get("carrito_info"):
+            nproductos, npacks = estado["carrito_info"]
+            st.caption(
+                f"Carrito importable: {nproductos} productos · {npacks} packs. "
+                "Solo cantidades mayores a cero; código como texto y cantidad numérica."
+            )
+        if estado.get("carrito_error"):
+            st.warning(f"Error del Carrito: {estado['carrito_error']}")
+
+
 def render_generar_pedido(github):
     st.header("Generar pedido")
     st.caption("Subí Stock, Sabores y Power BI. El Maestro y el Carrito vigentes se toman automáticamente.")
+    # Los dos archivos están disponibles antes de cualquier validación/st.stop.
+    # El fragmento evita el rerun completo al hacer clic en descargar.
+    _descargas_pedido_aisladas()
 
     if "ultimo_analisis_snapshot" in st.session_state:
         with st.expander("Simulador del último análisis", expanded=True):
@@ -1159,7 +1236,9 @@ def render_generar_pedido(github):
                 st.error(f"No se pudo calcular el costo del mix: {e}")
         if "costos_mix_actual" in st.session_state:
             indicadores, detalle_costos = st.session_state["costos_mix_actual"]
-            st.dataframe(formatear_importes_informe(indicadores), use_container_width=True, hide_index=True)
+            # Forzar la conversión a cadenas locales antes de enviar la tabla a Streamlit.
+            indicadores_visibles = _mostrar_indicadores_costos_mix(indicadores)
+            st.dataframe(indicadores_visibles, use_container_width=True, hide_index=True)
             st.warning("El costo total se calcula sobre productos con precio y kilos válidos. Revisá la cobertura antes de usarlo como costo total de toda la sucursal.")
             with st.expander("Auditar costos por producto y faltantes"):
                 st.dataframe(formatear_importes_informe(detalle_costos.drop(columns=["clave"], errors="ignore")), use_container_width=True, hide_index=True)
@@ -1217,6 +1296,9 @@ def render_generar_pedido(github):
                     "carrito_info": carrito_info,
                     "result": result,
                 }
+                # Una sola actualización después de generar: los botones aparecen arriba,
+                # juntos, y cada descarga funciona de manera independiente.
+                st.rerun()
             except Exception as e:
                 st.error("Ocurrió un error al generar el pedido.")
                 st.exception(e)
@@ -1256,30 +1338,6 @@ def render_generar_pedido(github):
             if len(sin_clasificar) > 0:
                 st.warning("Hay productos sin clasificar.")
 
-            st.download_button(
-                "DESCARGAR PEDIDO FINAL",
-                data=estado_pedido["pedido_bytes"],
-                file_name="Pedido_Final.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                key="descargar_pedido_final_persistente",
-                on_click="ignore",
-            )
-            if estado_pedido["carrito_bytes"] is not None:
-                st.download_button(
-                    "DESCARGAR CARRITO PARA IMPORTAR",
-                    data=estado_pedido["carrito_bytes"],
-                    file_name="Carrito_Importar.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key="descargar_carrito_importacion_persistente",
-                    on_click="ignore",
-                )
-                nproductos, npacks = estado_pedido["carrito_info"]
-                st.caption(f"Carrito importable: {nproductos} productos · {npacks} packs. "
-                           "Solo cantidades mayores a cero; código como texto y cantidad numérica.")
-            elif estado_pedido["carrito_error"]:
-                st.warning(f"No se pudo preparar el Carrito: {estado_pedido['carrito_error']}")
             with st.expander("Ver vista previa del pedido", expanded=False):
                 st.dataframe(formatear_importes_informe(pedido.head(100)), use_container_width=True)
             if stock_negativo is not None and len(stock_negativo) > 0:
