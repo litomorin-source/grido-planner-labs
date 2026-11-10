@@ -19,6 +19,7 @@ from core.validators import validar_maestro, validar_carrito
 from core.version import APP_VERSION
 from core.maestro_diff import comparar_maestros
 from core.costos_mix import calcular_costos_mix
+from core.capacidad_camara import leer_bultos_stock, proyectar_capacidad, CAPACIDAD_REFERENCIA
 
 from motor import (
     procesar_archivos,
@@ -37,7 +38,7 @@ HISTORIAL_STOCK_PATH = "data/Historial_Valorizaciones_Stock.csv"
 OMISIONES_PEDIDO_PATH = "data/Omisiones_Futuros_Pedidos.csv"
 COLUMNAS_HISTORIAL_STOCK = [
     "id", "fecha_hora", "fecha_stock", "nombre_archivo", "valor_stock", "archivo_stock_sha256",
-    "cantidad_unidades", "detalle_categorias_json"
+    "cantidad_unidades", "detalle_categorias_json", "bultos_netos"
 ]
 
 
@@ -198,7 +199,7 @@ def escribir_historial_stock(github, filas, descripcion):
     return True, None
 
 
-def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo, detalle_stock=None, categorias_stock=None):
+def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo, detalle_stock=None, categorias_stock=None, bultos_netos=None):
     fecha_stock = fecha_desde_nombre_stock(nombre_archivo)
     if fecha_stock is None:
         return False, ("El nombre del archivo no tiene el formato esperado "
@@ -225,6 +226,7 @@ def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo,
         "archivo_stock_sha256": hashlib.sha256(stock_bytes).hexdigest(),
         "cantidad_unidades": cantidad_unidades,
         "detalle_categorias_json": detalle_categorias_json,
+        "bultos_netos": "" if bultos_netos is None else str(round(float(bultos_netos), 3)),
     })
     ok, msg = escribir_historial_stock(
         github, filas, f"Registrar valorización de stock {fecha_stock.strftime('%Y-%m-%d %H:%M')}"
@@ -249,6 +251,7 @@ def mostrar_historial_stock(github):
                 df[c] = ""
         df["valor_stock"] = pd.to_numeric(df["valor_stock"], errors="coerce")
         df["cantidad_unidades"] = pd.to_numeric(df["cantidad_unidades"], errors="coerce")
+        df["bultos_netos"] = pd.to_numeric(df["bultos_netos"], errors="coerce")
         df["fecha_hora_parseada"] = pd.to_datetime(df["fecha_hora"], errors="coerce", utc=True).dt.tz_convert("America/Argentina/Buenos_Aires")
         df["fecha_stock_parseada"] = pd.to_datetime(df["fecha_stock"], errors="coerce", utc=True).dt.tz_convert("America/Argentina/Buenos_Aires")
         df = df.dropna(subset=["valor_stock"]).copy()
@@ -265,6 +268,7 @@ def mostrar_historial_stock(github):
             "Archivo": df["nombre_archivo"].fillna("").replace("", "Archivo anterior sin nombre"),
             "Valorización del stock": df["valor_stock"].apply(formato_moneda_ar),
             "Unidades equivalentes": df["cantidad_unidades"].apply(lambda v: f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if pd.notna(v) else "—"),
+            "Bultos netos": df["bultos_netos"].apply(lambda v: f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if pd.notna(v) else "—"),
         })
         st.dataframe(mostrar, hide_index=True, use_container_width=True)
 
@@ -289,6 +293,13 @@ def mostrar_historial_stock(github):
                            "No equivale necesariamente a unidades de venta al público. Los registros anteriores no tienen cantidad.")
             else:
                 st.info("Las cantidades comenzarán a aparecer al generar una nueva valorización. Los registros anteriores solo tienen pesos.")
+
+        con_bultos = graficos[["fecha_orden", "bultos_netos"]].dropna().rename(
+            columns={"fecha_orden": "Fecha", "bultos_netos": "Bultos netos"}
+        ).set_index("Fecha") if not graficos.empty else pd.DataFrame()
+        if not con_bultos.empty:
+            st.markdown("**Bultos netos en cámara**")
+            st.line_chart(con_bultos, use_container_width=True)
 
         st.download_button("DESCARGAR HISTORIAL CSV", data=df[COLUMNAS_HISTORIAL_STOCK].to_csv(index=False).encode("utf-8-sig"), file_name="Historial_Valorizaciones_Stock.csv", mime="text/csv", key="descargar_historial_val_stock")
         st.markdown("**Eliminar un registro**")
@@ -1300,6 +1311,29 @@ def render_generar_pedido(github):
             ready = False
             st.info("📄 Power BI: pendiente")
 
+        # La capacidad se presenta en cuanto se carga el stock, sin exigir el
+        # resto de los archivos ni ejecutar el cálculo del pedido.
+        capacidad_stock = None
+        limite_bultos = st.number_input(
+            "Capacidad de referencia de cámara (bultos)",
+            min_value=1.0, max_value=100000.0, value=float(CAPACIDAD_REFERENCIA),
+            step=1.0, format="%.2f", key="capacidad_camara_limite",
+            help="Referencia inicial: stock neto del 05/11/2026 cuando la cámara estaba al límite. Es editable."
+        )
+        if "stock" in paths:
+            try:
+                capacidad_stock = leer_bultos_stock(paths["stock"])
+                st.subheader("Bultos actuales en cámara")
+                cb1, cb2, cb3 = st.columns(3)
+                cb1.metric("Bultos netos", f"{capacidad_stock['netos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                cb2.metric("Capacidad referencia", f"{limite_bultos:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                cb3.metric("Ocupación actual", f"{capacidad_stock['netos']/limite_bultos*100:,.1f}%".replace(".", ","))
+                st.caption("Sumatoria NET A de la columna Bultos de SmartFran, incluidos negativos por aperturas de caja pendientes. Incluye helado, impulsivos, Frizzio y congelados multimarca. No incluye Smoothie, insumos ni descartables.")
+                with st.expander("Ver bultos por grupo", expanded=False):
+                    st.dataframe(capacidad_stock["por_grupo"].style.format({"Bultos netos": "{:.2f}"}), hide_index=True, use_container_width=True)
+            except Exception as exc:
+                st.warning(f"No pude calcular los bultos del stock: {exc}")
+
         st.markdown("---")
         st.subheader("Informe costo stock")
         mostrar_historial_stock(github)
@@ -1317,7 +1351,8 @@ def render_generar_pedido(github):
                     valor_total_stock = result_stock.get("valor_stock_total", 0)
                     guardado, resultado_guardado = guardar_valorizacion_stock(
                         github, valor_total_stock, stock_file.getvalue(), stock_file.name,
-                        detalle_stock=result_stock.get("detalle"), categorias_stock=result_stock.get("categoria")
+                        detalle_stock=result_stock.get("detalle"), categorias_stock=result_stock.get("categoria"),
+                        bultos_netos=capacidad_stock["netos"] if capacidad_stock is not None else None
                     )
                     if guardado:
                         st.success(f"Valorización guardada en el historial · {resultado_guardado}")
@@ -1447,6 +1482,9 @@ def render_generar_pedido(github):
                     "carrito_error": carrito_error,
                     "carrito_info": carrito_info,
                     "result": result,
+                    "dias_analizados_capacidad": dias_analizados,
+                    "semanas_reposicion_capacidad": tiempo_reposicion,
+                    "stock_archivo_hash_capacidad": hashlib.sha256(stock_file.getvalue()).hexdigest(),
                 }
                 # No forzar rerun: mostrarlos inmediatamente en esta misma ejecución.
                 st.success("Los dos archivos del pedido quedaron preparados para descargar.")
@@ -1467,6 +1505,42 @@ def render_generar_pedido(github):
             stock_negativo = result.get("stock_negativo")
             st.success("Pedido analizado correctamente.")
             render_diagnostico_pedido(result)
+            st.markdown("---")
+            st.subheader("Capacidad proyectada al recibir el pedido")
+            st.caption("La recepción se proyecta usando la semana de reposición y el promedio de ventas del mismo pedido. No supone que el pedido llega hoy.")
+            if capacidad_stock is None:
+                st.info("Cargá un Stock válido para calcular los bultos de cámara.")
+            elif hashlib.sha256(stock_file.getvalue()).hexdigest() != estado_pedido.get("stock_archivo_hash_capacidad"):
+                st.warning("El stock cargado cambió desde el análisis. Volvé a generar el pedido para proyectar la capacidad correctamente.")
+            else:
+                try:
+                    proy = proyectar_capacidad(
+                        pedido, capacidad_stock["netos"],
+                        estado_pedido.get("dias_analizados_capacidad", dias_analizados),
+                        estado_pedido.get("semanas_reposicion_capacidad", tiempo_reposicion),
+                        limite_bultos,
+                    )
+                    pc1, pc2, pc3, pc4 = st.columns(4)
+                    pc1.metric("Bultos actuales", f"{capacidad_stock['netos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                    pc2.metric(f"Consumo próximo {proy['dias_hasta_recepcion']:g} días", f"−{proy['consumo_esperado_bultos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                    pc3.metric("Bultos de la compra", f"+{proy['pedido_bultos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                    pc4.metric("Bultos al recibir", f"{proy['bultos_al_recibir']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                    ocup = proy["ocupacion_pct"]
+                    st.progress(max(0.0, min(1.0, ocup / 100)), text=f"Ocupación estimada al recibir: {ocup:.1f}% · Referencia: {limite_bultos:.2f} bultos")
+                    if ocup > 100:
+                        st.error("El pedido supera la capacidad de referencia. Revisá cantidades y almacenamiento antes de comprar.")
+                    elif ocup >= 90:
+                        st.warning("La recepción deja la cámara cerca del límite de capacidad.")
+                    else:
+                        st.success("La recepción queda dentro de la capacidad de referencia.")
+                    st.caption("El consumo se calcula producto por producto según el mix y se limita al stock disponible de cada uno. No se descuentan insumos, descartables ni ventas no identificadas. La capacidad es una referencia operativa, no un límite técnico certificado.")
+                    if proy["sin_conversion"]:
+                        st.warning(f"{proy['sin_conversion']} productos del pedido no tienen equivalencia/código suficiente para proyectar sus bultos. Revisá el detalle.")
+                    with st.expander("Auditar bultos del pedido y consumo estimado", expanded=False):
+                        st.dataframe(proy["detalle"], hide_index=True, use_container_width=True)
+                except Exception as exc:
+                    st.error(f"No pude proyectar la capacidad: {exc}")
+
             st.markdown("---")
             st.header("Resumen final")
             m1, m2, m3, m4, m5 = st.columns(5)
