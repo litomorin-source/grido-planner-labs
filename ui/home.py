@@ -1249,13 +1249,40 @@ def identificar_archivo_operativo(nombre, contenido):
                 if all(c in primera for c in ("categoria", "subcategoria", "grupo", "producto")):
                     return "data", "Mix de Ventas (formato anterior)"
 
-            # Cajas por Sabor suele tener líneas de filtros antes del encabezado.
-            primeras_filas = pd.read_excel(_BytesIO(contenido), header=None, nrows=25)
-            for fila in primeras_filas.itertuples(index=False, name=None):
-                textos = [normalize(v) for v in fila if pd.notna(v)]
-                if any(t in ("sabor", "sabores") for t in textos) and any(t in ("caja", "cajas") for t in textos):
-                    return "sabores", "Cajas por Sabor"
-            return None, "Excel no identificado. Debe ser Mix de Ventas o Cajas por Sabor."
+            # Cajas por Sabor de SmartFran: hay exportaciones con varias
+            # líneas de filtros y encabezados ligeramente distintos.
+            # No depender del nombre de archivo ni de una coincidencia exacta.
+            libro = pd.ExcelFile(_BytesIO(contenido))
+            for hoja in libro.sheet_names:
+                vista = pd.read_excel(libro, sheet_name=hoja, header=None, nrows=80)
+                if vista.shape[1] < 2:
+                    continue
+                for indice, fila in vista.iterrows():
+                    etiquetas = [normalize(x) if pd.notna(x) else "" for x in fila.tolist()]
+                    es_sabor = lambda t: t in ("sabor", "sabores", "nombre del sabor", "nombre sabor") or t.startswith("sabor ")
+                    es_cajas = lambda t: t in ("caja", "cajas", "cantidad de cajas", "cant cajas", "cajas vendidas") or t.endswith(" cajas")
+                    if any(es_sabor(t) for t in etiquetas) and any(es_cajas(t) for t in etiquetas):
+                        return "sabores", "Cajas por Sabor"
+
+                # Algunas exportaciones incluyen filtros o títulos en vez
+                # de encabezados directos. Validación secundaria: al menos
+                # tres sabores de granel 7,8 kg con cantidades numéricas,
+                # y solamente dos columnas de datos útiles.
+                if vista.shape[1] == 2:
+                    encontrados = 0
+                    for _, fila in vista.iterrows():
+                        sabor, cajas = fila.iloc[0], fila.iloc[1]
+                        if pd.isna(sabor) or pd.isna(cajas):
+                            continue
+                        nombre_sabor = normalize(sabor)
+                        contiene_granel = bool(re.search(r"7\s*800\s*kg|7\s*8\s*kg", nombre_sabor))
+                        cantidad = pd.to_numeric(cajas, errors="coerce")
+                        if contiene_granel and pd.notna(cantidad):
+                            encontrados += 1
+                    if encontrados >= 3:
+                        return "sabores", "Cajas por Sabor (reconocido por productos)"
+            return None, ("Excel no identificado como Mix de Ventas ni Cajas por Sabor. "
+                          "Revisá que sea la exportación de SmartFran con sabores y cajas.")
         return None, "Formato no admitido. Subí archivos CSV o XLSX."
     except Exception as exc:
         return None, f"No se pudo reconocer el archivo: {exc}"
@@ -1285,11 +1312,11 @@ def render_carga_inteligente():
         huella = hashlib.sha256(contenido).hexdigest()
         if huella in st.session_state.setdefault("huellas_procesadas_260", set()):
             continue
-        st.session_state["huellas_procesadas_260"].add(huella)
         tipo, descripcion = identificar_archivo_operativo(nuevo.name, contenido)
         if not tipo:
             st.warning(f"{nuevo.name}: {descripcion}")
             continue
+        st.session_state["huellas_procesadas_260"].add(huella)
         item = {"bytes": contenido, "nombre": nuevo.name, "hash": huella, "descripcion": descripcion}
         anterior = archivos.get(tipo)
         if anterior and anterior["hash"] != huella:
