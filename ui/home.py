@@ -1259,10 +1259,32 @@ def identificar_archivo_operativo(nombre, contenido):
                     continue
                 for indice, fila in vista.iterrows():
                     etiquetas = [normalize(x) if pd.notna(x) else "" for x in fila.tolist()]
-                    es_sabor = lambda t: t in ("sabor", "sabores", "nombre del sabor", "nombre sabor") or t.startswith("sabor ")
-                    es_cajas = lambda t: t in ("caja", "cajas", "cantidad de cajas", "cant cajas", "cajas vendidas") or t.endswith(" cajas")
-                    if any(es_sabor(t) for t in etiquetas) and any(es_cajas(t) for t in etiquetas):
-                        return "sabores", "Cajas por Sabor"
+                    # SmartFran exporta dos variantes conocidas:
+                    #   Caja | Cantidad (el archivo real del 15/11/2026)
+                    #   Sabor | Cajas / Cantidad
+                    # Exigir la pareja de encabezados en columnas diferentes
+                    # y filas posteriores con sabores de 7,8 kg y cantidades numéricas.
+                    col_producto = [j for j, t in enumerate(etiquetas) if t in (
+                        "caja", "sabor", "sabores", "nombre del sabor", "nombre sabor", "producto"
+                    )]
+                    col_cantidad = [j for j, t in enumerate(etiquetas) if t in (
+                        "cantidad", "cant", "cajas", "cantidad de cajas", "cant cajas", "cajas vendidas"
+                    )]
+                    if col_producto and col_cantidad:
+                        inicio = int(indice) + 1
+                        for c_nombre in col_producto:
+                            for c_cantidad in col_cantidad:
+                                if c_nombre == c_cantidad:
+                                    continue
+                                encontrados = 0
+                                for _, f_datos in vista.iloc[inicio:inicio + 50].iterrows():
+                                    n = normalize(f_datos.iloc[c_nombre]) if pd.notna(f_datos.iloc[c_nombre]) else ""
+                                    cantidad = pd.to_numeric(f_datos.iloc[c_cantidad], errors="coerce")
+                                    if (re.search(r"7\s*(?:800|8)\s*kg", n)
+                                            and pd.notna(cantidad)):
+                                        encontrados += 1
+                                if encontrados >= 2:
+                                    return "sabores", "Cajas por Sabor (Caja/Cantidad)"
 
                 # Algunas exportaciones incluyen filtros o títulos en vez
                 # de encabezados directos. Validación secundaria: al menos
