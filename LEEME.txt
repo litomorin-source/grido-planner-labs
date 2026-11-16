@@ -1,0 +1,3 @@
+Labs 2.6.1
+Reemplazar ui/home.py, core/costos_mix.py y core/version.py.
+Costos funciona con Cajas + Mix sin Stock. Validaciones pasan a Configuración. Se agrega cobertura de kilos conocidos y tabla unificada/exportable de productos sin cobertura. No modificar Maestro, Carrito ni datos.

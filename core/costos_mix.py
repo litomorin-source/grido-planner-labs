@@ -64,8 +64,16 @@ def calcular_costos_mix(sabores_file, data_file, maestro_file, carrito_file):
     for grupo,d in [('Granel',detalle[detalle.Grupo=='Granel']),('Envasados',detalle[detalle.Grupo=='Envasados']),('General',detalle)]:
         ok=d[d['Costo reposición'].notna() & d['Kilos vendidos'].notna() & d['Kilos vendidos'].gt(0)]
         costo=ok['Costo reposición'].sum(); kilos=ok['Kilos vendidos'].sum()
+        # Cobertura por kilos: denominador = todos los kilos positivos conocidos del
+        # período, incluso si el producto no tiene costo de reposición.
+        # No atribuir kilos inventados a productos sin información de peso.
+        kilos_conocidos = d.loc[d['Kilos vendidos'].notna() & d['Kilos vendidos'].gt(0), 'Kilos vendidos'].sum()
+        sin_kilos = int((d['Kilos vendidos'].isna() | d['Kilos vendidos'].le(0)).sum())
         resultados.append({'Grupo':grupo,'Costo de reposición':round(float(costo),2),
                            'Kilos valorizados':round(float(kilos),3),
+                           'Kilos detectados (conocidos)':round(float(kilos_conocidos),3),
+                           'Cobertura kilos conocidos (%)':round(100*float(kilos)/float(kilos_conocidos),1) if kilos_conocidos else None,
+                           'Productos sin kilos':sin_kilos,
                            'Costo por kg':round(float(costo/kilos),2) if kilos else None,
                            'Productos valorizados':len(ok),'Productos detectados':len(d),
                            'Cobertura productos (%)':round(100*len(ok)/len(d),1) if len(d) else 0})
