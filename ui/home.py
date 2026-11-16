@@ -19,7 +19,11 @@ from core.validators import validar_maestro, validar_carrito
 from core.version import APP_VERSION
 from core.maestro_diff import comparar_maestros
 from core.costos_mix import calcular_costos_mix
-from core.capacidad_camara import leer_bultos_stock, proyectar_capacidad, CAPACIDAD_REFERENCIA
+from ui.diseno import aplicar_diseno, render_resumen, grafico_historial, SECCIONES
+from core.presentacion import formato_bultos, formatear_bultos
+from core.estado_analisis import huella_analisis, invalidar_si_cambio
+from core.fechas_entrega import miercoles_semana_siguiente, semanas_hasta_recepcion
+from core.capacidad_camara import preparar_movimientos_camara, leer_bultos_stock, proyectar_capacidad, CAPACIDAD_REFERENCIA
 
 from motor import (
     procesar_archivos,
@@ -38,7 +42,7 @@ HISTORIAL_STOCK_PATH = "data/Historial_Valorizaciones_Stock.csv"
 OMISIONES_PEDIDO_PATH = "data/Omisiones_Futuros_Pedidos.csv"
 COLUMNAS_HISTORIAL_STOCK = [
     "id", "fecha_hora", "fecha_stock", "nombre_archivo", "valor_stock", "archivo_stock_sha256",
-    "cantidad_unidades", "detalle_categorias_json", "bultos_netos"
+    "cantidad_unidades", "detalle_categorias_json", "bultos_netos", "valorizacion_completa"
 ]
 
 
@@ -95,9 +99,9 @@ def maestro_para_pedido(maestro_path, carpeta, omisiones):
 
 def _control_omitir_faltantes(github, posibles_faltantes):
     """Omisión reversible que no cambia el Maestro ni su historial."""
-    st.markdown("**Omitir productos discontinuados de próximos pedidos**")
+    st.markdown("**Omitir productos discontinuados de pedidos y costos**")
     st.caption("Se guarda una lista independiente del Maestro. Al marcar un producto, "
-               "se excluye en los próximos análisis, pedidos y simulaciones de Labs.")
+               "se excluye de pedidos, simulaciones y costos del mix de Labs.")
     try:
         omisiones = leer_omisiones_pedido(github)
     except Exception as exc:
@@ -110,7 +114,7 @@ def _control_omitir_faltantes(github, posibles_faltantes):
                              if str(x).strip() and normalize(x) not in activos})
         if candidatos:
             elegido = st.selectbox("Producto a omitir", candidatos, key="omision_faltantes_producto")
-            if st.button("OMITIR DE FUTUROS PEDIDOS", key="omision_faltantes_guardar"):
+            if st.button("OMITIR DE PEDIDOS Y COSTOS", key="omision_faltantes_guardar"):
                 base = normalize(elegido)
                 # Releer antes de guardar por si otro usuario hizo una modificación.
                 actual = leer_omisiones_pedido(github)
@@ -125,13 +129,12 @@ def _control_omitir_faltantes(github, posibles_faltantes):
                     except Exception as exc:
                         st.error(f"No se pudo guardar la omisión: {exc}")
                         return
-                # Conservar el análisis para continuar omitiendo productos sin rehacerlo.
-                # Los archivos generados antes de la omisión quedan bloqueados hasta recalcular.
-                st.session_state["pedido_pendiente_recalculo_omisiones"] = True
-                st.session_state["omisiones_pedido_vigentes"] = actual
+                # Evitar mostrar o descargar un pedido calculado antes del cambio.
+                st.session_state.pop("pedido_descargas_labs", None)
+                st.session_state.pop("ultimo_analisis_snapshot", None)
+                st.session_state.pop("costos_mix_actual", None)
                 st.session_state["mensaje_omision_pedido"] = (
-                    f"{elegido}: guardado en omisiones. Podés seguir omitiendo productos; "
-                    "regenerá el pedido una sola vez al terminar."
+                    f"{elegido}: omitido de pedidos y costos. Volvé a generar el pedido o calcular costos para aplicar el cambio."
                 )
                 st.rerun()
         else:
@@ -149,11 +152,11 @@ def _control_omitir_faltantes(github, posibles_faltantes):
                 except Exception as exc:
                     st.error(f"No se pudo revertir la omisión: {exc}")
                     return
-                st.session_state["pedido_pendiente_recalculo_omisiones"] = True
-                st.session_state["omisiones_pedido_vigentes"] = nuevos
+                st.session_state.pop("pedido_descargas_labs", None)
+                st.session_state.pop("ultimo_analisis_snapshot", None)
+                st.session_state.pop("costos_mix_actual", None)
                 st.session_state["mensaje_omision_pedido"] = (
-                    f"{quitar}: nuevamente incluido. El análisis sigue visible; "
-                    "regenerá el pedido cuando termines de editar las omisiones."
+                    f"{quitar}: nuevamente incluido en pedidos y costos. Recalculá el análisis que necesites."
                 )
                 st.rerun()
 
@@ -202,7 +205,7 @@ def escribir_historial_stock(github, filas, descripcion):
     return True, None
 
 
-def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo, detalle_stock=None, categorias_stock=None, bultos_netos=None):
+def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo, detalle_stock=None, categorias_stock=None, bultos_netos=None, valorizacion_completa=True):
     fecha_stock = fecha_desde_nombre_stock(nombre_archivo)
     if fecha_stock is None:
         return False, ("El nombre del archivo no tiene el formato esperado "
@@ -229,6 +232,7 @@ def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo,
         "archivo_stock_sha256": hashlib.sha256(stock_bytes).hexdigest(),
         "cantidad_unidades": cantidad_unidades,
         "detalle_categorias_json": detalle_categorias_json,
+        "valorizacion_completa": "Sí" if valorizacion_completa else "No",
         "bultos_netos": "" if bultos_netos is None else str(round(float(bultos_netos), 3)),
     })
     ok, msg = escribir_historial_stock(
@@ -270,66 +274,46 @@ def mostrar_historial_stock(github):
             "Registrado el": df["fecha_hora_parseada"].apply(fecha_visible),
             "Archivo": df["nombre_archivo"].fillna("").replace("", "Archivo anterior sin nombre"),
             "Valorización del stock": df["valor_stock"].apply(formato_moneda_ar),
+            "Valorización completa": df["valorizacion_completa"].fillna("").replace("", "Sin verificar"),
             "Unidades equivalentes": df["cantidad_unidades"].apply(lambda v: f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if pd.notna(v) else "—"),
-            "Bultos netos": df["bultos_netos"].apply(lambda v: f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if pd.notna(v) else "—"),
+            "Bultos netos": df["bultos_netos"].map(formato_bultos),
         })
-        st.dataframe(mostrar, hide_index=True, use_container_width=True)
-
-        st.markdown("#### Evolución histórica del stock")
-        graficos = df.dropna(subset=["fecha_orden"]).sort_values("fecha_orden", ascending=True)
-        if not graficos.empty:
-            # El índice se conserva como fecha/hora; registros repetidos de un mismo stock
-            # quedan diferenciados por la hora del registro si la tienen.
-            con_pesos = graficos[["fecha_orden", "valor_stock"]].dropna().rename(
-                columns={"fecha_orden": "Fecha", "valor_stock": "Valorización ($)"}
-            ).set_index("Fecha")
-            st.markdown("**Valorización del stock ($)**")
-            st.line_chart(con_pesos, use_container_width=True)
-
-            con_unidades = graficos[["fecha_orden", "cantidad_unidades"]].dropna().rename(
-                columns={"fecha_orden": "Fecha", "cantidad_unidades": "Unidades equivalentes"}
-            ).set_index("Fecha")
-            st.markdown("**Cantidad en stock (unidades equivalentes)**")
-            if not con_unidades.empty:
-                st.line_chart(con_unidades, use_container_width=True)
-                st.caption("Se suman las unidades equivalentes del motor (incluye tachos/cajas y productos individuales). "
-                           "No equivale necesariamente a unidades de venta al público. Los registros anteriores no tienen cantidad.")
-            else:
-                st.info("Las cantidades comenzarán a aparecer al generar una nueva valorización. Los registros anteriores solo tienen pesos.")
-
-        con_bultos = graficos[["fecha_orden", "bultos_netos"]].dropna().rename(
-            columns={"fecha_orden": "Fecha", "bultos_netos": "Bultos netos"}
-        ).set_index("Fecha") if not graficos.empty else pd.DataFrame()
-        if not con_bultos.empty:
-            st.markdown("**Bultos netos en cámara**")
-            st.line_chart(con_bultos, use_container_width=True)
+        st.markdown("#### Evolución del stock")
+        grafico_historial(df)
+        st.markdown("#### Registros")
+        compacto = mostrar[["Fecha del stock", "Valorización del stock", "Bultos netos", "Valorización completa"]].rename(columns={"Valorización completa":"Estado"})
+        compacto["Estado"] = compacto["Estado"].replace({"No":"Incompleto","Sí":"Completo"})
+        st.dataframe(compacto, hide_index=True, use_container_width=True)
+        with st.expander("Ver archivos y detalles de registro", expanded=False):
+            st.dataframe(mostrar, hide_index=True, use_container_width=True)
 
         st.download_button("DESCARGAR HISTORIAL CSV", data=df[COLUMNAS_HISTORIAL_STOCK].to_csv(index=False).encode("utf-8-sig"), file_name="Historial_Valorizaciones_Stock.csv", mime="text/csv", key="descargar_historial_val_stock")
-        st.markdown("**Eliminar un registro**")
-        opciones = {}
-        for _, fila in df.iterrows():
-            identificador = str(fila.get("id", ""))
-            if not identificador:
-                continue
-            nombre = str(fila.get("nombre_archivo", "")).strip() or "Registro anterior"
-            fecha = fecha_visible(fila["fecha_stock_parseada"] if pd.notna(fila["fecha_stock_parseada"]) else fila["fecha_hora_parseada"])
-            etiqueta = f"{fecha} · {formato_moneda_ar(fila['valor_stock'])} · {nombre} · {identificador[:8]}"
-            opciones[etiqueta] = identificador
-        if opciones:
-            eleccion = st.selectbox("Registro a borrar", list(opciones.keys()), key="historico_stock_elegir_borrar")
-            confirmar = st.checkbox("Confirmo que quiero borrar este registro del historial", key="historico_stock_confirmar_borrar")
-            if st.button("ELIMINAR REGISTRO", disabled=not confirmar, key="historico_stock_borrar"):
-                elegido = opciones[eleccion]
-                nuevas = [fila for fila in filas if str(fila.get("id", "")) != elegido]
-                if len(nuevas) == len(filas):
-                    st.error("No encontré ese registro para borrar.")
-                else:
-                    ok, msg = escribir_historial_stock(github, nuevas, "Eliminar registro de valorización stock")
-                    if ok:
-                        st.success("Registro eliminado del historial.")
-                        st.rerun()
+        with st.expander("Administrar registros", expanded=False):
+            st.markdown("**Eliminar un registro**")
+            opciones = {}
+            for _, fila in df.iterrows():
+                identificador = str(fila.get("id", ""))
+                if not identificador:
+                    continue
+                nombre = str(fila.get("nombre_archivo", "")).strip() or "Registro anterior"
+                fecha = fecha_visible(fila["fecha_stock_parseada"] if pd.notna(fila["fecha_stock_parseada"]) else fila["fecha_hora_parseada"])
+                etiqueta = f"{fecha} · {formato_moneda_ar(fila['valor_stock'])} · {nombre} · {identificador[:8]}"
+                opciones[etiqueta] = identificador
+            if opciones:
+                eleccion = st.selectbox("Registro a borrar", list(opciones.keys()), key="historico_stock_elegir_borrar")
+                confirmar = st.checkbox("Confirmo que quiero borrar este registro del historial", key="historico_stock_confirmar_borrar")
+                if st.button("ELIMINAR REGISTRO", disabled=not confirmar, key="historico_stock_borrar"):
+                    elegido = opciones[eleccion]
+                    nuevas = [fila for fila in filas if str(fila.get("id", "")) != elegido]
+                    if len(nuevas) == len(filas):
+                        st.error("No encontré ese registro para borrar.")
                     else:
-                        st.error(f"No se pudo borrar: {msg}")
+                        ok, msg = escribir_historial_stock(github, nuevas, "Eliminar registro de valorización stock")
+                        if ok:
+                            st.success("Registro eliminado del historial.")
+                            st.rerun()
+                        else:
+                            st.error(f"No se pudo borrar: {msg}")
 
 
 def formato_moneda_ar(valor):
@@ -916,9 +900,14 @@ def render_diagnostico_pedido(result):
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Productos detectados", len(pedido))
     m2.metric("Packs sugeridos", total_packs)
-    m3.metric("Valor pedido", formato_moneda_ar(valor_pedido_total))
-    m4.metric("Valor stock", formato_moneda_ar(valor_stock_total))
+    m3.metric("Subtotal pedido conocido" if result.get("pedido_valorizacion_incompleta") else "Valor pedido", formato_moneda_ar(valor_pedido_total))
+    m4.metric("Subtotal stock conocido" if result.get("stock_valorizacion_incompleta") else "Valor stock", formato_moneda_ar(valor_stock_total))
 
+    sin_precio = result.get("sin_precio")
+    if sin_precio is not None and not sin_precio.empty:
+        st.warning("Hay productos sin precio válido. Los importes mostrados suman solo los productos valorizados.")
+        with st.expander("Revisar productos sin precio", expanded=True):
+            st.dataframe(formatear_importes_informe(sin_precio[["Producto", "Código Compra", "Stock", "Packs a Comprar"]]), hide_index=True)
     a1, a2, a3, a4 = st.columns(4)
     a1.metric("Stock negativo", len(stock_negativo) if stock_negativo is not None else 0)
     a2.metric("Sin clasificar", len(sin_clasificar) if sin_clasificar is not None else 0)
@@ -1032,21 +1021,24 @@ def render_simulador_parametros(snapshot, key_prefix="sim"):
             a_nombre = st.text_input("Nombre A", value="Conservador", key=f"{key_prefix}_a_nombre")
             a_sem = st.number_input("Semanas objetivo A", min_value=0.5, max_value=12.0, value=max(float(base_params["Semanas objetivo"]) - 1, 0.5), step=0.5, key=f"{key_prefix}_a_sem")
             a_rep = st.number_input("Reposición A", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key=f"{key_prefix}_a_rep")
-            a_dias = st.number_input("Días A", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key=f"{key_prefix}_a_dias")
+            a_dias = int(base_params["Días analizados"])
+            st.caption(f"Período del informe: {a_dias} días (se conserva en los tres escenarios)")
 
         with c2:
             st.subheader("Escenario B")
             b_nombre = st.text_input("Nombre B", value="Actual", key=f"{key_prefix}_b_nombre")
             b_sem = st.number_input("Semanas objetivo B", min_value=0.5, max_value=12.0, value=float(base_params["Semanas objetivo"]), step=0.5, key=f"{key_prefix}_b_sem")
             b_rep = st.number_input("Reposición B", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key=f"{key_prefix}_b_rep")
-            b_dias = st.number_input("Días B", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key=f"{key_prefix}_b_dias")
+            b_dias = int(base_params["Días analizados"])
+            st.caption(f"Período del informe: {b_dias} días (se conserva en los tres escenarios)")
 
         with c3:
             st.subheader("Escenario C")
             c_nombre = st.text_input("Nombre C", value="Mayor cobertura", key=f"{key_prefix}_c_nombre")
             c_sem = st.number_input("Semanas objetivo C", min_value=0.5, max_value=12.0, value=min(float(base_params["Semanas objetivo"]) + 1, 12.0), step=0.5, key=f"{key_prefix}_c_sem")
             c_rep = st.number_input("Reposición C", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key=f"{key_prefix}_c_rep")
-            c_dias = st.number_input("Días C", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key=f"{key_prefix}_c_dias")
+            c_dias = int(base_params["Días analizados"])
+            st.caption(f"Período del informe: {c_dias} días (se conserva en los tres escenarios)")
 
     if not st.button("SIMULAR ESCENARIOS", use_container_width=True, key=f"{key_prefix}_button_1"):
         return
@@ -1105,6 +1097,8 @@ def render_simulador_parametros(snapshot, key_prefix="sim"):
                     "Packs sugeridos": metrics["packs_sugeridos"],
                     "Valor pedido": int(metrics["valor_pedido"]),
                     "Valor stock": int(metrics["valor_stock"]),
+                    "Valor pedido completo": not res.get("pedido_valorizacion_incompleta", False),
+                    "Valor stock completo": not res.get("stock_valorizacion_incompleta", False),
                 })
 
                 tmp_pedido = res["pedido"].copy()
@@ -1172,19 +1166,16 @@ def render_simulador_parametros(snapshot, key_prefix="sim"):
 def _descargas_pedido_aisladas():
     """Fragmento independiente: descargar no reejecuta los cálculos ni el formulario."""
     estado = st.session_state.get("pedido_descargas_labs")
-    if not estado:
-        return
-    if st.session_state.get("pedido_pendiente_recalculo_omisiones", False):
-        st.warning("Las omisiones cambiaron desde el último análisis. "
-                   "Las descargas anteriores están bloqueadas para evitar un pedido desactualizado. "
-                   "Podés seguir omitiendo productos y regenerar el pedido una sola vez al terminar.")
+    if not estado or estado.get("huella") != st.session_state.get("huella_insumos_labs"):
         return
     with st.container(border=True):
-        st.subheader("Descargas del último pedido generado")
+        st.markdown("**Descargar pedido**")
+        if estado["result"].get("pedido_valorizacion_incompleta"):
+            st.warning("El importe del pedido está incompleto. Revisá los productos sin precio antes de comprar.")
         col_pedido, col_carrito = st.columns(2)
         with col_pedido:
             st.download_button(
-                "DESCARGAR PEDIDO FINAL",
+                "Pedido en Excel",
                 data=estado["pedido_bytes"],
                 file_name="Pedido_Final.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1195,7 +1186,7 @@ def _descargas_pedido_aisladas():
         with col_carrito:
             if estado.get("carrito_bytes") is not None:
                 st.download_button(
-                    "DESCARGAR CARRITO PARA IMPORTAR",
+                    "Carrito para importar",
                     data=estado["carrito_bytes"],
                     file_name="Carrito_Importar.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1322,15 +1313,13 @@ def _invalidar_resultados_por_cambio_archivos():
     # No mostrar un pedido anterior como si correspondiera a los nuevos archivos.
     for clave in ("pedido_descargas_labs", "ultimo_analisis_snapshot", "costos_mix_actual", "informe_stock_bytes_260"):
         st.session_state.pop(clave, None)
-    st.session_state.pop("pedido_pendiente_recalculo_omisiones", None)
 
 
 def render_carga_inteligente():
     """Admite 1, 2 o 3 archivos, en una o varias cargas, conservados en la sesión."""
     archivos = st.session_state.setdefault("archivos_operativos_260", {})
     pendientes = st.session_state.setdefault("reemplazos_pendientes_260", {})
-    st.subheader("Carga inteligente de archivos")
-    st.caption("Subí uno o varios archivos juntos. Los reconozco por las columnas y conservo los anteriores.")
+    st.caption("Subí Stock, Cajas por Sabor y Mix de Ventas. Podés cargarlos juntos o por separado.")
     generacion = st.session_state.setdefault("generacion_carga_260", 0)
     cargados = st.file_uploader(
         "Seleccionar Stock, Cajas por Sabor y/o Mix de Ventas",
@@ -1338,6 +1327,7 @@ def render_carga_inteligente():
         key=f"subida_operativa_260_{generacion}",
     )
 
+    incorporados = False
     for nuevo in cargados or []:
         contenido = nuevo.getvalue()
         huella = hashlib.sha256(contenido).hexdigest()
@@ -1354,7 +1344,11 @@ def render_carga_inteligente():
             pendientes[tipo] = item
         elif not anterior:
             archivos[tipo] = item
+            incorporados = True
             _invalidar_resultados_por_cambio_archivos()
+
+    if incorporados:
+        st.rerun()
 
     nombres = {"stock": "Stock", "sabores": "Cajas por Sabor", "data": "Mix de Ventas"}
     columnas_estado = st.columns(3)
@@ -1362,10 +1356,10 @@ def render_carga_inteligente():
         with columnas_estado[idx]:
             item = archivos.get(tipo)
             if item:
-                st.success(f"✅ {etiqueta}")
+                st.markdown(f"**✓ {etiqueta} listo**")
                 st.caption(item["nombre"])
             else:
-                st.info(f"○ {etiqueta} pendiente")
+                st.caption(f"○ {etiqueta} pendiente")
 
     for tipo, item in list(pendientes.items()):
         st.warning(f"Ya hay un archivo de {nombres[tipo]}. ¿Reemplazarlo por {item['nombre']}?")
@@ -1379,7 +1373,7 @@ def render_carga_inteligente():
             del pendientes[tipo]
             st.rerun()
 
-    if st.button("Limpiar los tres archivos y empezar de nuevo", key="limpiar_operativos_260"):
+    if st.button("Limpiar archivos", key="limpiar_operativos_260"):
         st.session_state["archivos_operativos_260"] = {}
         st.session_state["reemplazos_pendientes_260"] = {}
         st.session_state["huellas_procesadas_260"] = set()
@@ -1389,25 +1383,31 @@ def render_carga_inteligente():
 
     return {tipo: _ArchivoDeSesion(item["bytes"], item["nombre"]) for tipo, item in archivos.items()}
 
-def render_generar_pedido(github):
-    st.header("Panel de planificación")
-    st.caption("Labs 2.6.1 · Carga flexible, cobertura de kilos y faltantes unificados. Producción no se modifica.")
+def render_generar_pedido(github, pagina="Pedido"):
     mensaje_omision = st.session_state.pop("mensaje_omision_pedido", None)
     if mensaje_omision:
         st.success(mensaje_omision)
 
-    archivos = render_carga_inteligente()
+    total_archivos = len(st.session_state.get("archivos_operativos_260", {}))
+    reemplazos = bool(st.session_state.get("reemplazos_pendientes_260"))
+    titulo_carga = "3 archivos listos · Cambiar archivos" if total_archivos == 3 else f"Archivos del análisis · {total_archivos}/3 cargados"
+    with st.expander(titulo_carga, expanded=total_archivos < 3 or reemplazos):
+        archivos = render_carga_inteligente()
     stock_file = archivos.get("stock")
     sabores_file = archivos.get("sabores")
     data_file = archivos.get("data")
 
-    tab_pedido, tab_pallets, tab_stock, tab_costos, tab_config = st.tabs([
-        "Pedido", "Pallets", "Stock y cámara", "Costos", "Configuración"
-    ])
+    # Contenedores con identidad estable conservan widgets y datos al navegar,
+    # igual que las pestañas anteriores. El diseño muestra solo la sección elegida.
+    tab_pedido = st.container(key="vista-pedido")
+    tab_stock = st.container(key="vista-stock")
+    tab_costos = st.container(key="vista-costos")
+    tab_config = st.container(key="vista-config")
+    tab_pallets = st.container(key="vista-pallets")
     # Se calculan los parámetros en la pestaña Configuración antes de que
     # cualquier panel utilice sus valores; no se recalcula el motor al cambiar de pestaña.
     with tab_config:
-        st.subheader("Parámetros del pedido")
+        st.subheader("Configuración del pedido")
         cfg1, cfg2, cfg3 = st.columns(3)
         with cfg1:
             semanas_objetivo = st.number_input("Semanas objetivo", min_value=0.5, max_value=12.0, value=4.0, step=0.5)
@@ -1415,7 +1415,7 @@ def render_generar_pedido(github):
             tiempo_reposicion = st.number_input("Tiempo de reposición", min_value=0.0, max_value=8.0, value=1.0, step=0.5)
         with cfg3:
             dias_analizados = st.number_input("Días analizados", min_value=1, max_value=60, value=14, step=1)
-        st.caption("Maestro, Carrito y omisiones se administran con el modo Administrador. Los parámetros se mantienen en la sesión.")
+        st.caption("Estos parámetros se conservan al cambiar de sección. Las omisiones se administran desde Pedido.")
 
     ready = True
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1494,14 +1494,40 @@ def render_generar_pedido(github):
                     ready = False
                     st.info("📄 Power BI: pendiente")
 
+        # Se verifica ANTES de mostrar cualquier resultado o descarga persistente.
+        omisiones_ok = True
+        try:
+            omisiones_vigentes = leer_omisiones_pedido(github)
+        except Exception as exc:
+            omisiones_ok = False
+            ready = False
+            omisiones_vigentes = []
+            st.session_state.pop("pedido_descargas_labs", None)
+            st.session_state.pop("ultimo_analisis_snapshot", None)
+            st.session_state.pop("costos_mix_actual", None)
+            with tab_pedido:
+                st.error(f"No pude verificar las omisiones. Reintentá antes de generar o descargar un pedido: {exc}")
+        params_actuales = {"Semanas objetivo": semanas_objetivo,
+                           "Tiempo de reposición": tiempo_reposicion,
+                           "Días analizados": dias_analizados}
+        huella_actual = huella_analisis(
+            {**{k: v.getvalue() for k, v in archivos.items()},
+             "maestro": maestro_path.read_bytes(), "carrito": carrito_path.read_bytes()},
+            params_actuales, omisiones_vigentes,
+        )
+        if invalidar_si_cambio(st.session_state, huella_actual):
+            with tab_pedido:
+                st.warning("Los archivos, parámetros o las omisiones cambiaron. Volvé a ANALIZAR Y GENERAR PEDIDO para habilitar las descargas actualizadas.")
+
         with tab_stock:
             # La capacidad se presenta en cuanto se carga el stock, sin exigir el
             # resto de los archivos ni ejecutar el cálculo del pedido.
+            st.subheader("Stock y cámara")
             capacidad_stock = None
             limite_bultos = st.number_input(
                 "Capacidad de referencia de cámara (bultos)",
                 min_value=1.0, max_value=100000.0, value=float(CAPACIDAD_REFERENCIA),
-                step=1.0, format="%.2f", key="capacidad_camara_limite",
+                step=1.0, format="%.0f", key="capacidad_camara_limite",
                 help="Referencia inicial: stock neto del 05/11/2026 cuando la cámara estaba al límite. Es editable."
             )
             if "stock" in paths:
@@ -1509,12 +1535,12 @@ def render_generar_pedido(github):
                     capacidad_stock = leer_bultos_stock(paths["stock"])
                     st.subheader("Bultos actuales en cámara")
                     cb1, cb2, cb3 = st.columns(3)
-                    cb1.metric("Bultos netos", f"{capacidad_stock['netos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-                    cb2.metric("Capacidad referencia", f"{limite_bultos:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                    cb1.metric("Bultos netos", formato_bultos(capacidad_stock["netos"]))
+                    cb2.metric("Capacidad referencia", formato_bultos(limite_bultos))
                     cb3.metric("Ocupación actual", f"{capacidad_stock['netos']/limite_bultos*100:,.1f}%".replace(".", ","))
                     st.caption("Sumatoria NET A de la columna Bultos de SmartFran, incluidos negativos por aperturas de caja pendientes. Incluye helado, impulsivos, Frizzio y congelados multimarca. No incluye Smoothie, insumos ni descartables.")
                     with st.expander("Ver bultos por grupo", expanded=False):
-                        st.dataframe(capacidad_stock["por_grupo"].style.format({"Bultos netos": "{:.2f}"}), hide_index=True, use_container_width=True)
+                        st.dataframe(formatear_bultos(capacidad_stock["por_grupo"]), hide_index=True, use_container_width=True)
                 except Exception as exc:
                     st.warning(f"No pude calcular los bultos del stock: {exc}")
 
@@ -1536,13 +1562,19 @@ def render_generar_pedido(github):
                         guardado, resultado_guardado = guardar_valorizacion_stock(
                             github, valor_total_stock, stock_file.getvalue(), stock_file.name,
                             detalle_stock=result_stock.get("detalle"), categorias_stock=result_stock.get("categoria"),
-                            bultos_netos=capacidad_stock["netos"] if capacidad_stock is not None else None
+                            bultos_netos=capacidad_stock["netos"] if capacidad_stock is not None else None,
+                            valorizacion_completa=not result_stock.get("stock_valorizacion_incompleta", False),
                         )
                         if guardado:
                             st.success(f"Valorización guardada en el historial · {resultado_guardado}")
                         else:
                             st.error(f"El informe se generó, pero NO se guardó en el historial: {resultado_guardado}")
-                        st.metric("Valor stock actual", formato_moneda_ar(valor_total_stock))
+                        incompleto = result_stock.get("stock_valorizacion_incompleta", False)
+                        st.metric("Subtotal stock conocido" if incompleto else "Valor stock actual", formato_moneda_ar(valor_total_stock))
+                        if incompleto:
+                            st.warning("Valorización incompleta: hay stock sin precio. El historial registra este importe como subtotal conocido.")
+                            st.dataframe(formatear_importes_informe(result_stock["sin_precio"]), hide_index=True)
+
                         if result_stock.get("categoria") is not None:
                             with st.expander("Ver valorización por categoría", expanded=False):
                                 df_categoria = result_stock["categoria"].copy()
@@ -1602,9 +1634,15 @@ def render_generar_pedido(github):
                 st.markdown("---")
                 st.subheader("Análisis según tu mix de ventas del período")
                 st.caption("Costo de reposición con precios actuales del Carrito; composición de las ventas según los archivos cargados. No es el CMV contable.")
-                if st.button("CALCULAR COSTOS SEGÚN MI MIX", key="costos_mix_240", use_container_width=True):
+                st.caption("Se aplica la misma lista de omisiones de Pedidos. Los productos omitidos no participan del costo ni de la cobertura de este análisis.")
+                if omisiones_vigentes:
+                    with st.expander(f"Productos omitidos también en Costos ({len(omisiones_vigentes)})"):
+                        st.write(", ".join(sorted(f["producto_base"] for f in omisiones_vigentes)))
+                if not omisiones_ok:
+                    st.error("No pude verificar las omisiones guardadas. Reintentá antes de calcular costos.")
+                if st.button("CALCULAR COSTOS SEGÚN MI MIX", key="costos_mix_240", use_container_width=True, disabled=not omisiones_ok):
                     try:
-                        indicadores, detalle_costos = calcular_costos_mix(paths["sabores"], paths["data"], maestro_path, carrito_path)
+                        indicadores, detalle_costos = calcular_costos_mix(paths["sabores"], paths["data"], maestro_path, carrito_path, omisiones=omisiones_vigentes)
                         st.session_state["costos_mix_actual"] = (indicadores, detalle_costos)
                     except Exception as e:
                         st.error(f"No se pudo calcular el costo del mix: {e}")
@@ -1621,7 +1659,7 @@ def render_generar_pedido(github):
                     # Tabla de texto ya formateado: así Streamlit no puede revertir el formato
                     # a valores numéricos mediante inferencia de tipos.
                     st.dataframe(indicadores_visibles.astype(str), use_container_width=True, hide_index=True)
-                    st.warning("El costo total se calcula sobre productos con precio y kilos válidos. Revisá la cobertura antes de usarlo como costo total de toda la sucursal.")
+                    st.warning("El costo se calcula sobre los productos incluidos con precio y kilos válidos. Las omisiones también se excluyen de la cobertura; este importe no representa necesariamente toda la sucursal.")
                     # Se consideran sin cobertura todos los productos que no tienen
                     # simultáneamente costo de reposición y kilos válidos.
                     costos_num = pd.to_numeric(detalle_costos["Costo reposición"], errors="coerce")
@@ -1665,20 +1703,14 @@ def render_generar_pedido(github):
                 st.info("Para calcular costos según tu mix necesitás Cajas por Sabor y Mix de Ventas validados. No necesitás Stock.")
 
         with tab_pedido:
-            _descargas_visibles_arriba = (bool(st.session_state.get("pedido_descargas_labs"))
-                                          and not st.session_state.get("pedido_pendiente_recalculo_omisiones", False))
-            if _descargas_visibles_arriba:
-                _descargas_pedido_aisladas()
-            if ("ultimo_analisis_snapshot" in st.session_state
-                    and not st.session_state.get("pedido_pendiente_recalculo_omisiones", False)):
-                with st.expander("Simulador del último análisis", expanded=False):
-                    render_simulador_parametros(st.session_state["ultimo_analisis_snapshot"], key_prefix="sim_1")
+            st.subheader("Pedido de reposición")
+            st.caption(f"Cobertura: {semanas_objetivo:g} semanas · Reposición: {tiempo_reposicion:g} semanas · Ventas: {dias_analizados} días · Ajustes en Configuración")
+            resumen_principal = st.container(key="resumen-pedido")
+            zona_descargas = st.container()
             if ready:
-                st.success("✅ Todo listo para generar el pedido.")
-                if st.button("ANALIZAR Y GENERAR PEDIDO", type="primary", use_container_width=True):
+                if st.button("Generar pedido", type="primary", use_container_width=True):
                     output = tmp / "Pedido_Final.xlsx"
                     try:
-                        omisiones_vigentes = leer_omisiones_pedido(github)
                         st.session_state["omisiones_pedido_vigentes"] = omisiones_vigentes
                         maestro_pedido = maestro_para_pedido(maestro_path, tmp, omisiones_vigentes)
                         result = procesar_archivos(
@@ -1726,6 +1758,7 @@ def render_generar_pedido(github):
                         except Exception as exc_importacion:
                             carrito_error = str(exc_importacion)
                         st.session_state["pedido_descargas_labs"] = {
+                            "huella": huella_actual,
                             "pedido_bytes": pedido_bytes,
                             "carrito_bytes": carrito_bytes,
                             "carrito_error": carrito_error,
@@ -1735,9 +1768,8 @@ def render_generar_pedido(github):
                             "semanas_reposicion_capacidad": tiempo_reposicion,
                             "stock_archivo_hash_capacidad": hashlib.sha256(stock_file.getvalue()).hexdigest(),
                         }
-                        st.session_state["pedido_pendiente_recalculo_omisiones"] = False
                         # No forzar rerun: mostrarlos inmediatamente en esta misma ejecución.
-                        st.success("Los dos archivos del pedido quedaron preparados para descargar.")
+                        st.caption("Pedido actualizado. Las descargas están listas.")
                     except Exception as e:
                         st.error("Ocurrió un error al generar el pedido.")
                         st.exception(e)
@@ -1746,109 +1778,101 @@ def render_generar_pedido(github):
                 # después de cualquier rerun causado por una descarga.
                 estado_pedido = st.session_state.get("pedido_descargas_labs")
                 if estado_pedido:
-                    if not _descargas_visibles_arriba:
-                        _descargas_pedido_aisladas()
                     result = estado_pedido["result"]
                     pedido = result["pedido"]
                     sin_clasificar = result["sin_clasificar"]
                     posibles_faltantes = result.get("posibles_faltantes")
                     stock_negativo = result.get("stock_negativo")
-                    omisiones_actuales = {
-                        normalize(f.get("producto_base", ""))
-                        for f in st.session_state.get("omisiones_pedido_vigentes", [])
-                    }
-                    # El resultado original queda intacto para auditoría, pero las filas
-                    # ya omitidas desaparecen de la lista de trabajo sin recalcular.
-                    if (posibles_faltantes is not None and not posibles_faltantes.empty
-                            and "Producto" in posibles_faltantes.columns and omisiones_actuales):
-                        posibles_faltantes = posibles_faltantes.loc[
-                            ~posibles_faltantes["Producto"].map(normalize).isin(omisiones_actuales)
-                        ].copy()
-                    if st.session_state.get("pedido_pendiente_recalculo_omisiones", False):
-                        st.info("Estás trabajando sobre el análisis anterior. Las omisiones ya están "
-                                "guardadas y se aplicarán al regenerar el pedido. "
-                                "Podés seguir marcando productos sin perder esta pantalla.")
-                    else:
-                        st.success("Pedido analizado correctamente.")
-                    render_diagnostico_pedido(result)
-                    st.markdown("---")
-                    st.subheader("Capacidad proyectada al recibir el pedido")
-                    st.caption("La recepción se proyecta usando la semana de reposición y el promedio de ventas del mismo pedido. No supone que el pedido llega hoy.")
+                    with zona_descargas:
+                        _descargas_pedido_aisladas()
+                    proy = None
+                    st.subheader("Espacio de cámara al recibir")
+                    st.caption("Una fecha estimada para revisar el espacio de cámara. Podés ajustarla cuando coordines con el transporte.")
                     if capacidad_stock is None:
                         st.info("Cargá un Stock válido para calcular los bultos de cámara.")
                     elif hashlib.sha256(stock_file.getvalue()).hexdigest() != estado_pedido.get("stock_archivo_hash_capacidad"):
                         st.warning("El stock cargado cambió desde el análisis. Volvé a generar el pedido para proyectar la capacidad correctamente.")
                     else:
                         try:
+                            hoy_local = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).date()
+                            fecha_stock_detectada = fecha_desde_nombre_stock(stock_file.name)
+                            fecha_stock_camara = fecha_stock_detectada.date() if fecha_stock_detectada else st.date_input(
+                                "Fecha del stock cargado", value=hoy_local, key="fecha_stock_camara_manual"
+                            )
+                            fecha_llegada = st.date_input(
+                                "Llegada estimada para revisar cámara",
+                                value=miercoles_semana_siguiente(hoy_local),
+                                min_value=fecha_stock_camara, key="fecha_llegada_camara",
+                                help="Para un pedido realizado esta semana, usamos el miércoles de la semana siguiente como referencia. Podés elegir otro día. Esta fecha ajusta la proyección de cámara; la compra usa los parámetros del pedido.",
+                            )
+                            horizonte_camara = semanas_hasta_recepcion(fecha_stock_camara, fecha_llegada)
+                            st.caption(f"Stock del {fecha_stock_camara:%d/%m/%Y} · Llegada estimada {fecha_llegada:%d/%m/%Y}. Se incluye el tránsito pendiente como recibido para esa fecha.")
+                            movimientos = preparar_movimientos_camara(paths["stock"], maestro_path)
                             proy = proyectar_capacidad(
                                 pedido, capacidad_stock["netos"],
                                 estado_pedido.get("dias_analizados_capacidad", dias_analizados),
-                                estado_pedido.get("semanas_reposicion_capacidad", tiempo_reposicion),
-                                limite_bultos,
+                                horizonte_camara,
+                                limite_bultos, movimientos_stock=movimientos, incluir_transito=True,
                             )
-                            pc1, pc2, pc3, pc4 = st.columns(4)
-                            pc1.metric("Bultos actuales", f"{capacidad_stock['netos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-                            pc2.metric(f"Consumo próximo {proy['dias_hasta_recepcion']:g} días", f"−{proy['consumo_esperado_bultos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-                            pc3.metric("Bultos de la compra", f"+{proy['pedido_bultos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-                            pc4.metric("Bultos al recibir", f"{proy['bultos_al_recibir']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                            pc1, pc2, pc3, pc4, pc5 = st.columns(5)
+                            pc1.metric("Bultos actuales", formato_bultos(capacidad_stock["netos"]))
+                            pc2.metric(f"Consumo estimado en {proy['dias_hasta_recepcion']:g} días", "−" + formato_bultos(proy["consumo_esperado_bultos"]))
+                            pc3.metric("Bultos de la compra", "+" + formato_bultos(proy["pedido_bultos"]))
+                            pc5.metric("Tránsito incluido", "+" + formato_bultos(proy["transito_bultos"]))
+                            pc4.metric("Bultos al recibir (conocidos)", formato_bultos(proy["bultos_al_recibir"]))
                             ocup = proy["ocupacion_pct"]
-                            st.progress(max(0.0, min(1.0, ocup / 100)), text=f"Ocupación estimada al recibir: {ocup:.1f}% · Referencia: {limite_bultos:.2f} bultos")
+                            st.progress(max(0.0, min(1.0, ocup / 100)), text=f"Ocupación estimada al recibir: {ocup:.1f}% · Referencia: {formato_bultos(limite_bultos)} bultos")
+                            if proy["transito_sin_conversion"]:
+                                st.error("Hay tránsito sin equivalencia de bultos. La ocupación está incompleta: no se puede confirmar que haya espacio suficiente.")
                             if ocup > 100:
                                 st.error("El pedido supera la capacidad de referencia. Revisá cantidades y almacenamiento antes de comprar.")
                             elif ocup >= 90:
                                 st.warning("La recepción deja la cámara cerca del límite de capacidad.")
-                            else:
+                            elif not proy["transito_sin_conversion"]:
                                 st.success("La recepción queda dentro de la capacidad de referencia.")
-                            st.caption("El consumo se calcula producto por producto según el mix y se limita al stock disponible de cada uno. No se descuentan insumos, descartables ni ventas no identificadas. La capacidad es una referencia operativa, no un límite técnico certificado.")
+                            st.caption("El consumo se calcula producto por producto según el mix y se limita al stock disponible de cada uno. No se descuentan insumos, descartables ni ventas no identificadas. Se suma el tránsito pendiente para la fecha estimada. Por prudencia, se descuenta consumo solo contra stock físico; no se anticipan ventas de entregas pendientes. La capacidad es una referencia operativa, no un límite técnico certificado.")
                             if proy["sin_conversion"]:
                                 st.warning(f"{proy['sin_conversion']} productos del pedido no tienen equivalencia/código suficiente para proyectar sus bultos. Revisá el detalle.")
                             with st.expander("Auditar bultos del pedido y consumo estimado", expanded=False):
-                                st.dataframe(proy["detalle"], hide_index=True, use_container_width=True)
+                                st.dataframe(formatear_bultos(proy["detalle"]), hide_index=True, use_container_width=True)
                         except Exception as exc:
                             st.error(f"No pude proyectar la capacidad: {exc}")
 
-                    st.markdown("---")
-                    st.header("Resumen final")
-                    m1, m2, m3, m4, m5 = st.columns(5)
-                    m1.metric("Productos en pedido", len(pedido))
-                    m2.metric("Stock negativo", len(stock_negativo) if stock_negativo is not None else 0)
-                    m3.metric("Sin clasificar", len(sin_clasificar))
-                    m4.metric("Posibles faltantes", len(posibles_faltantes) if posibles_faltantes is not None else 0)
-                    m5.metric("Packs sugeridos", int(pedido["Packs a Comprar"].fillna(0).sum()))
-                    v1, v2 = st.columns(2)
-                    v1.metric("Valor stock actual", formato_moneda_ar(result.get("valor_stock_total", 0)))
-                    v2.metric("Valor pedido sugerido", formato_moneda_ar(result.get("valor_pedido_total", 0)))
+                    with resumen_principal:
+                        render_resumen(result, proy)
+                    st.subheader("Detalle del pedido")
+                    compra_visible = pedido[pedido["Packs a Comprar"].gt(0)]
+                    columnas = ["Producto", "Packs a Comprar", "Valor Pedido Sugerido", "Stock", "Semanas Stock"]
+                    st.dataframe(formatear_importes_informe(compra_visible[columnas]), hide_index=True, use_container_width=True)
+                    with st.expander("Diagnóstico y alertas del pedido", expanded=False):
+                        render_diagnostico_pedido(result)
+                    if "ultimo_analisis_snapshot" in st.session_state:
+                        with st.expander("Comparar coberturas de compra", expanded=False):
+                            render_simulador_parametros(st.session_state["ultimo_analisis_snapshot"], key_prefix="sim_1")
                     if result.get("valorizacion_categoria") is not None:
                         with st.expander("Ver valorización por categoría", expanded=False):
                             st.dataframe(formatear_importes_informe(result["valorizacion_categoria"]), use_container_width=True)
                     if result.get("valorizacion_producto") is not None:
                         with st.expander("Ver valorización por producto", expanded=False):
                             st.dataframe(formatear_importes_informe(result["valorizacion_producto"]), use_container_width=True)
-                    if stock_negativo is not None and len(stock_negativo) > 0:
-                        st.error("⚠️ Se detectaron productos con stock negativo.")
-                    if posibles_faltantes is not None and len(posibles_faltantes) > 0:
-                        st.warning("Se detectaron posibles faltantes.")
-                    if len(sin_clasificar) > 0:
-                        st.warning("Hay productos sin clasificar.")
-
-                    with st.expander("Ver vista previa del pedido", expanded=False):
+                    with st.expander("Ver todas las columnas y productos", expanded=False):
                         st.dataframe(formatear_importes_informe(pedido.head(100)), use_container_width=True)
                     if stock_negativo is not None and len(stock_negativo) > 0:
-                        with st.expander("Ver stock negativo", expanded=True):
+                        with st.expander("Ver stock negativo", expanded=False):
                             st.dataframe(formatear_importes_informe(stock_negativo), use_container_width=True)
                     if posibles_faltantes is not None and len(posibles_faltantes) > 0:
                         with st.expander("Ver posibles faltantes", expanded=True):
                             st.dataframe(formatear_importes_informe(posibles_faltantes), use_container_width=True)
                             _control_omitir_faltantes(github, posibles_faltantes)
                     else:
-                        with st.expander("Administrar omisiones de futuros pedidos", expanded=False):
+                        with st.expander("Productos omitidos de Pedidos y Costos", expanded=False):
                             _control_omitir_faltantes(github, None)
                     if len(sin_clasificar) > 0:
-                        with st.expander("Ver productos sin clasificar", expanded=True):
+                        with st.expander("Ver productos sin clasificar", expanded=False):
                             st.dataframe(sin_clasificar, use_container_width=True)
 
             else:
-                st.info("Subí y validá los tres archivos para habilitar el análisis y generar un pedido.")
+                st.info("Cargá los tres archivos para generar tu pedido. Podés consultar Stock y cámara con el stock solamente.")
 
         with tab_pallets:
             st.subheader("Optimizador de pallets")
@@ -2018,12 +2042,11 @@ def render_actualizar_archivos(github):
         render_historial_maestro(github)
 
 def render_home():
-    st.title("🍦 GridoPlanner Labs")
-    st.caption(APP_VERSION)
-
-    modo = st.sidebar.radio("Modo", ["Usuario", "Administrador"])
-    st.sidebar.markdown("---")
-    st.sidebar.info(f"Versión {APP_VERSION}")
+    st.sidebar.markdown("### Planificación")
+    pagina = st.sidebar.radio("Sección", list(SECCIONES), key="navegacion_labs", label_visibility="collapsed")
+    with st.sidebar.expander("Administración", expanded=False):
+        modo = st.radio("Modo", ["Usuario", "Administrador"], key="modo_labs")
+    aplicar_diseno(pagina if modo == "Usuario" else "Administrador", APP_VERSION)
 
     config = get_github_config()
 
@@ -2036,7 +2059,7 @@ def render_home():
     github = GitHubSync(config["token"], config["repo"], config["branch"])
 
     if modo == "Usuario":
-        render_generar_pedido(github)
+        render_generar_pedido(github, pagina)
         return
 
     st.header("Administrador")
