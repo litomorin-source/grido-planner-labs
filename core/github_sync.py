@@ -200,10 +200,13 @@ class GitHubSync:
 
         return {"ok": False, "message": f"No pude consultar archivo existente. Status {r.status_code}", "details": r.text[:800]}
 
-    def upload_bytes_file(self, path: str, content_bytes: bytes, commit_message: str):
+    def upload_bytes_file(self, path: str, content_bytes: bytes, commit_message: str, expected_sha=None):
         sha_result = self._get_existing_sha(path)
         if not sha_result["ok"]:
             return sha_result
+
+        if expected_sha is not None and sha_result["sha"] != expected_sha:
+            return {"ok": False, "message": "El archivo cambió en GitHub. Revisá la versión nueva antes de guardar."}
 
         url = f"{self.api_base}/repos/{self.repo}/contents/{path}"
         payload = {

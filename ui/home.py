@@ -20,6 +20,7 @@ from core.version import APP_VERSION
 from core.maestro_diff import comparar_maestros
 from core.costos_mix import calcular_costos_mix
 from ui.diseno import aplicar_diseno, render_resumen, grafico_historial, SECCIONES
+from ui.productos import render_completar_productos
 from core.presentacion import formato_bultos, formatear_bultos
 from core.estado_analisis import huella_analisis, invalidar_si_cambio
 from core.fechas_entrega import miercoles_semana_siguiente, semanas_hasta_recepcion
@@ -1384,6 +1385,9 @@ def render_carga_inteligente():
     return {tipo: _ArchivoDeSesion(item["bytes"], item["nombre"]) for tipo, item in archivos.items()}
 
 def render_generar_pedido(github, pagina="Pedido"):
+    mensaje_alta = st.session_state.pop("mensaje_alta_producto", None)
+    if mensaje_alta:
+        st.success(mensaje_alta)
     mensaje_omision = st.session_state.pop("mensaje_omision_pedido", None)
     if mensaje_omision:
         st.success(mensaje_omision)
@@ -1545,6 +1549,8 @@ def render_generar_pedido(github, pagina="Pedido"):
                     st.warning(f"No pude calcular los bultos del stock: {exc}")
 
             st.markdown("---")
+            if pagina == "Stock y cámara" and validez["stock"]:
+                render_completar_productos(github, paths["stock"], maestro_path, carrito_path, ADMIN_PIN)
             st.subheader("Informe costo stock")
             mostrar_historial_stock(github)
             if "stock" in paths:
@@ -1840,10 +1846,10 @@ def render_generar_pedido(github, pagina="Pedido"):
 
                     with resumen_principal:
                         render_resumen(result, proy)
-                    st.subheader("Detalle del pedido")
-                    compra_visible = pedido[pedido["Packs a Comprar"].gt(0)]
-                    columnas = ["Producto", "Packs a Comprar", "Valor Pedido Sugerido", "Stock", "Semanas Stock"]
-                    st.dataframe(formatear_importes_informe(compra_visible[columnas]), hide_index=True, use_container_width=True)
+                    with st.expander("Detalle del pedido", expanded=False):
+                        compra_visible = pedido[pedido["Packs a Comprar"].gt(0)]
+                        columnas = ["Producto", "Packs a Comprar", "Valor Pedido Sugerido", "Stock", "Semanas Stock"]
+                        st.dataframe(formatear_importes_informe(compra_visible[columnas]), hide_index=True, use_container_width=True)
                     with st.expander("Diagnóstico y alertas del pedido", expanded=False):
                         render_diagnostico_pedido(result)
                     if "ultimo_analisis_snapshot" in st.session_state:
