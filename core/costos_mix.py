@@ -5,7 +5,10 @@ from motor import (load_config,load_productos,load_aliases,load_exclusiones,load
                    read_sabores,read_data,normalize,normalizar_codigo_compra,safe_num)
 
 
-def calcular_costos_mix(sabores_file, data_file, maestro_file, carrito_file):
+def calcular_costos_mix(sabores_file, data_file, maestro_file, carrito_file, omisiones=None):
+    """Aplica las mismas omisiones persistidas que Pedidos antes de calcular
+    detalle, alertas y cobertura. Quitar una omisión vuelve a incluir el producto.
+    """
     productos=load_productos(maestro_file)
     productos=productos[productos['Activo'] & ~productos['Excluir']].copy()
     pmap=productos.set_index('Producto Base').to_dict('index')
@@ -15,6 +18,8 @@ def calcular_costos_mix(sabores_file, data_file, maestro_file, carrito_file):
           'Tipo Presentación':r.get('Tipo Presentación',''), 'Pack Detectado':r.get('Pack Detectado',np.nan),
           'Regla Conversión':r.get('Regla Conversión',''), 'Alias Encontrado':True}
     exc=load_exclusiones(maestro_file)
+    exc.update(normalize(fila.get('producto_base', '')) for fila in (omisiones or []))
+    exc.discard('')
     precios=load_precios_carrito(carrito_file)
     sabores=read_sabores(sabores_file,am,pmap,exc)
     mix=read_data(data_file,load_config(maestro_file),am,pmap,exc)

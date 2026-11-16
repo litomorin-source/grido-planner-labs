@@ -19,7 +19,9 @@ from core.validators import validar_maestro, validar_carrito
 from core.version import APP_VERSION
 from core.maestro_diff import comparar_maestros
 from core.costos_mix import calcular_costos_mix
+from core.presentacion import formato_bultos, formatear_bultos
 from core.estado_analisis import huella_analisis, invalidar_si_cambio
+from core.fechas_entrega import miercoles_semana_siguiente, semanas_hasta_recepcion
 from core.capacidad_camara import preparar_movimientos_camara, leer_bultos_stock, proyectar_capacidad, CAPACIDAD_REFERENCIA
 
 from motor import (
@@ -96,9 +98,9 @@ def maestro_para_pedido(maestro_path, carpeta, omisiones):
 
 def _control_omitir_faltantes(github, posibles_faltantes):
     """Omisión reversible que no cambia el Maestro ni su historial."""
-    st.markdown("**Omitir productos discontinuados de próximos pedidos**")
+    st.markdown("**Omitir productos discontinuados de pedidos y costos**")
     st.caption("Se guarda una lista independiente del Maestro. Al marcar un producto, "
-               "se excluye en los próximos análisis, pedidos y simulaciones de Labs.")
+               "se excluye de pedidos, simulaciones y costos del mix de Labs.")
     try:
         omisiones = leer_omisiones_pedido(github)
     except Exception as exc:
@@ -111,7 +113,7 @@ def _control_omitir_faltantes(github, posibles_faltantes):
                              if str(x).strip() and normalize(x) not in activos})
         if candidatos:
             elegido = st.selectbox("Producto a omitir", candidatos, key="omision_faltantes_producto")
-            if st.button("OMITIR DE FUTUROS PEDIDOS", key="omision_faltantes_guardar"):
+            if st.button("OMITIR DE PEDIDOS Y COSTOS", key="omision_faltantes_guardar"):
                 base = normalize(elegido)
                 # Releer antes de guardar por si otro usuario hizo una modificación.
                 actual = leer_omisiones_pedido(github)
@@ -129,8 +131,9 @@ def _control_omitir_faltantes(github, posibles_faltantes):
                 # Evitar mostrar o descargar un pedido calculado antes del cambio.
                 st.session_state.pop("pedido_descargas_labs", None)
                 st.session_state.pop("ultimo_analisis_snapshot", None)
+                st.session_state.pop("costos_mix_actual", None)
                 st.session_state["mensaje_omision_pedido"] = (
-                    f"{elegido}: omitido de futuros pedidos. Generá un pedido nuevo para aplicar el cambio."
+                    f"{elegido}: omitido de pedidos y costos. Volvé a generar el pedido o calcular costos para aplicar el cambio."
                 )
                 st.rerun()
         else:
@@ -150,8 +153,9 @@ def _control_omitir_faltantes(github, posibles_faltantes):
                     return
                 st.session_state.pop("pedido_descargas_labs", None)
                 st.session_state.pop("ultimo_analisis_snapshot", None)
+                st.session_state.pop("costos_mix_actual", None)
                 st.session_state["mensaje_omision_pedido"] = (
-                    f"{quitar}: nuevamente incluido para próximos análisis. Generá el pedido otra vez."
+                    f"{quitar}: nuevamente incluido en pedidos y costos. Recalculá el análisis que necesites."
                 )
                 st.rerun()
 
@@ -271,7 +275,7 @@ def mostrar_historial_stock(github):
             "Valorización del stock": df["valor_stock"].apply(formato_moneda_ar),
             "Valorización completa": df["valorizacion_completa"].fillna("").replace("", "Sin verificar"),
             "Unidades equivalentes": df["cantidad_unidades"].apply(lambda v: f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if pd.notna(v) else "—"),
-            "Bultos netos": df["bultos_netos"].apply(lambda v: f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if pd.notna(v) else "—"),
+            "Bultos netos": df["bultos_netos"].map(formato_bultos),
         })
         st.dataframe(mostrar, hide_index=True, use_container_width=True)
 
@@ -303,7 +307,7 @@ def mostrar_historial_stock(github):
         ).set_index("Fecha") if not graficos.empty else pd.DataFrame()
         if not con_bultos.empty:
             st.markdown("**Bultos netos en cámara**")
-            st.line_chart(con_bultos, use_container_width=True)
+            st.line_chart(con_bultos.round(0).astype("Int64"), use_container_width=True)
 
         st.download_button("DESCARGAR HISTORIAL CSV", data=df[COLUMNAS_HISTORIAL_STOCK].to_csv(index=False).encode("utf-8-sig"), file_name="Historial_Valorizaciones_Stock.csv", mime="text/csv", key="descargar_historial_val_stock")
         st.markdown("**Eliminar un registro**")
@@ -1511,6 +1515,7 @@ def render_generar_pedido(github):
             omisiones_vigentes = []
             st.session_state.pop("pedido_descargas_labs", None)
             st.session_state.pop("ultimo_analisis_snapshot", None)
+            st.session_state.pop("costos_mix_actual", None)
             with tab_pedido:
                 st.error(f"No pude verificar las omisiones. Reintentá antes de generar o descargar un pedido: {exc}")
         params_actuales = {"Semanas objetivo": semanas_objetivo,
@@ -1532,7 +1537,7 @@ def render_generar_pedido(github):
             limite_bultos = st.number_input(
                 "Capacidad de referencia de cámara (bultos)",
                 min_value=1.0, max_value=100000.0, value=float(CAPACIDAD_REFERENCIA),
-                step=1.0, format="%.2f", key="capacidad_camara_limite",
+                step=1.0, format="%.0f", key="capacidad_camara_limite",
                 help="Referencia inicial: stock neto del 05/11/2026 cuando la cámara estaba al límite. Es editable."
             )
             if "stock" in paths:
@@ -1540,12 +1545,12 @@ def render_generar_pedido(github):
                     capacidad_stock = leer_bultos_stock(paths["stock"])
                     st.subheader("Bultos actuales en cámara")
                     cb1, cb2, cb3 = st.columns(3)
-                    cb1.metric("Bultos netos", f"{capacidad_stock['netos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-                    cb2.metric("Capacidad referencia", f"{limite_bultos:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                    cb1.metric("Bultos netos", formato_bultos(capacidad_stock["netos"]))
+                    cb2.metric("Capacidad referencia", formato_bultos(limite_bultos))
                     cb3.metric("Ocupación actual", f"{capacidad_stock['netos']/limite_bultos*100:,.1f}%".replace(".", ","))
                     st.caption("Sumatoria NET A de la columna Bultos de SmartFran, incluidos negativos por aperturas de caja pendientes. Incluye helado, impulsivos, Frizzio y congelados multimarca. No incluye Smoothie, insumos ni descartables.")
                     with st.expander("Ver bultos por grupo", expanded=False):
-                        st.dataframe(capacidad_stock["por_grupo"].style.format({"Bultos netos": "{:.2f}"}), hide_index=True, use_container_width=True)
+                        st.dataframe(formatear_bultos(capacidad_stock["por_grupo"]), hide_index=True, use_container_width=True)
                 except Exception as exc:
                     st.warning(f"No pude calcular los bultos del stock: {exc}")
 
@@ -1639,9 +1644,15 @@ def render_generar_pedido(github):
                 st.markdown("---")
                 st.subheader("Análisis según tu mix de ventas del período")
                 st.caption("Costo de reposición con precios actuales del Carrito; composición de las ventas según los archivos cargados. No es el CMV contable.")
-                if st.button("CALCULAR COSTOS SEGÚN MI MIX", key="costos_mix_240", use_container_width=True):
+                st.caption("Se aplica la misma lista de omisiones de Pedidos. Los productos omitidos no participan del costo ni de la cobertura de este análisis.")
+                if omisiones_vigentes:
+                    with st.expander(f"Productos omitidos también en Costos ({len(omisiones_vigentes)})"):
+                        st.write(", ".join(sorted(f["producto_base"] for f in omisiones_vigentes)))
+                if not omisiones_ok:
+                    st.error("No pude verificar las omisiones guardadas. Reintentá antes de calcular costos.")
+                if st.button("CALCULAR COSTOS SEGÚN MI MIX", key="costos_mix_240", use_container_width=True, disabled=not omisiones_ok):
                     try:
-                        indicadores, detalle_costos = calcular_costos_mix(paths["sabores"], paths["data"], maestro_path, carrito_path)
+                        indicadores, detalle_costos = calcular_costos_mix(paths["sabores"], paths["data"], maestro_path, carrito_path, omisiones=omisiones_vigentes)
                         st.session_state["costos_mix_actual"] = (indicadores, detalle_costos)
                     except Exception as e:
                         st.error(f"No se pudo calcular el costo del mix: {e}")
@@ -1658,7 +1669,7 @@ def render_generar_pedido(github):
                     # Tabla de texto ya formateado: así Streamlit no puede revertir el formato
                     # a valores numéricos mediante inferencia de tipos.
                     st.dataframe(indicadores_visibles.astype(str), use_container_width=True, hide_index=True)
-                    st.warning("El costo total se calcula sobre productos con precio y kilos válidos. Revisá la cobertura antes de usarlo como costo total de toda la sucursal.")
+                    st.warning("El costo se calcula sobre los productos incluidos con precio y kilos válidos. Las omisiones también se excluyen de la cobertura; este importe no representa necesariamente toda la sucursal.")
                     # Se consideran sin cobertura todos los productos que no tienen
                     # simultáneamente costo de reposición y kilos válidos.
                     costos_num = pd.to_numeric(detalle_costos["Costo reposición"], errors="coerce")
@@ -1791,32 +1802,41 @@ def render_generar_pedido(github):
                     render_diagnostico_pedido(result)
                     st.markdown("---")
                     st.subheader("Capacidad proyectada al recibir el pedido")
-                    st.caption("La recepción se proyecta usando la semana de reposición y el promedio de ventas del mismo pedido. No supone que el pedido llega hoy.")
+                    st.caption("Una fecha estimada para revisar el espacio de cámara. Podés ajustarla cuando coordines con el transporte.")
                     if capacidad_stock is None:
                         st.info("Cargá un Stock válido para calcular los bultos de cámara.")
                     elif hashlib.sha256(stock_file.getvalue()).hexdigest() != estado_pedido.get("stock_archivo_hash_capacidad"):
                         st.warning("El stock cargado cambió desde el análisis. Volvé a generar el pedido para proyectar la capacidad correctamente.")
                     else:
                         try:
-                            incluir_transito = st.checkbox(
-                                "El tránsito pendiente llega antes o junto con este pedido",
-                                value=True, key="transito_antes_recepcion",
+                            hoy_local = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).date()
+                            fecha_stock_detectada = fecha_desde_nombre_stock(stock_file.name)
+                            fecha_stock_camara = fecha_stock_detectada.date() if fecha_stock_detectada else st.date_input(
+                                "Fecha del stock cargado", value=hoy_local, key="fecha_stock_camara_manual"
                             )
+                            fecha_llegada = st.date_input(
+                                "Llegada estimada para revisar cámara",
+                                value=miercoles_semana_siguiente(hoy_local),
+                                min_value=fecha_stock_camara, key="fecha_llegada_camara",
+                                help="Para un pedido realizado esta semana, usamos el miércoles de la semana siguiente como referencia. Podés elegir otro día. Esta fecha ajusta la proyección de cámara; la compra usa los parámetros del pedido.",
+                            )
+                            horizonte_camara = semanas_hasta_recepcion(fecha_stock_camara, fecha_llegada)
+                            st.caption(f"Stock del {fecha_stock_camara:%d/%m/%Y} · Llegada estimada {fecha_llegada:%d/%m/%Y}. Se incluye el tránsito pendiente como recibido para esa fecha.")
                             movimientos = preparar_movimientos_camara(paths["stock"], maestro_path)
                             proy = proyectar_capacidad(
                                 pedido, capacidad_stock["netos"],
                                 estado_pedido.get("dias_analizados_capacidad", dias_analizados),
-                                estado_pedido.get("semanas_reposicion_capacidad", tiempo_reposicion),
-                                limite_bultos, movimientos_stock=movimientos, incluir_transito=incluir_transito,
+                                horizonte_camara,
+                                limite_bultos, movimientos_stock=movimientos, incluir_transito=True,
                             )
                             pc1, pc2, pc3, pc4, pc5 = st.columns(5)
-                            pc1.metric("Bultos actuales", f"{capacidad_stock['netos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-                            pc2.metric(f"Consumo próximo {proy['dias_hasta_recepcion']:g} días", f"−{proy['consumo_esperado_bultos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-                            pc3.metric("Bultos de la compra", f"+{proy['pedido_bultos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-                            pc5.metric("Tránsito incluido", f"+{proy['transito_bultos']:.2f}")
-                            pc4.metric("Bultos al recibir (conocidos)", f"{proy['bultos_al_recibir']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                            pc1.metric("Bultos actuales", formato_bultos(capacidad_stock["netos"]))
+                            pc2.metric(f"Consumo estimado en {proy['dias_hasta_recepcion']:g} días", "−" + formato_bultos(proy["consumo_esperado_bultos"]))
+                            pc3.metric("Bultos de la compra", "+" + formato_bultos(proy["pedido_bultos"]))
+                            pc5.metric("Tránsito incluido", "+" + formato_bultos(proy["transito_bultos"]))
+                            pc4.metric("Bultos al recibir (conocidos)", formato_bultos(proy["bultos_al_recibir"]))
                             ocup = proy["ocupacion_pct"]
-                            st.progress(max(0.0, min(1.0, ocup / 100)), text=f"Ocupación estimada al recibir: {ocup:.1f}% · Referencia: {limite_bultos:.2f} bultos")
+                            st.progress(max(0.0, min(1.0, ocup / 100)), text=f"Ocupación estimada al recibir: {ocup:.1f}% · Referencia: {formato_bultos(limite_bultos)} bultos")
                             if proy["transito_sin_conversion"]:
                                 st.error("Hay tránsito sin equivalencia de bultos. La ocupación está incompleta: no se puede confirmar que haya espacio suficiente.")
                             if ocup > 100:
@@ -1825,11 +1845,11 @@ def render_generar_pedido(github):
                                 st.warning("La recepción deja la cámara cerca del límite de capacidad.")
                             elif not proy["transito_sin_conversion"]:
                                 st.success("La recepción queda dentro de la capacidad de referencia.")
-                            st.caption("El consumo se calcula producto por producto según el mix y se limita al stock disponible de cada uno. No se descuentan insumos, descartables ni ventas no identificadas. Se suma el tránsito según la opción indicada. Por prudencia, se descuenta consumo solo contra stock físico; no se anticipan ventas de entregas pendientes. La capacidad es una referencia operativa, no un límite técnico certificado.")
+                            st.caption("El consumo se calcula producto por producto según el mix y se limita al stock disponible de cada uno. No se descuentan insumos, descartables ni ventas no identificadas. Se suma el tránsito pendiente para la fecha estimada. Por prudencia, se descuenta consumo solo contra stock físico; no se anticipan ventas de entregas pendientes. La capacidad es una referencia operativa, no un límite técnico certificado.")
                             if proy["sin_conversion"]:
                                 st.warning(f"{proy['sin_conversion']} productos del pedido no tienen equivalencia/código suficiente para proyectar sus bultos. Revisá el detalle.")
                             with st.expander("Auditar bultos del pedido y consumo estimado", expanded=False):
-                                st.dataframe(proy["detalle"], hide_index=True, use_container_width=True)
+                                st.dataframe(formatear_bultos(proy["detalle"]), hide_index=True, use_container_width=True)
                         except Exception as exc:
                             st.error(f"No pude proyectar la capacidad: {exc}")
 

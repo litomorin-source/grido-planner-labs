@@ -3,6 +3,7 @@
 GRIDO_DATOS_PRUEBA=/carpeta/con/los/4/archivos python -m unittest discover -s tests -v
 """
 import copy
+from datetime import date, timedelta
 import os
 from pathlib import Path
 import sys
@@ -19,6 +20,34 @@ sys.path.insert(0, str(ROOT))
 import motor
 from core.estado_analisis import huella_analisis, invalidar_si_cambio
 from core.capacidad_camara import leer_bultos_stock, preparar_movimientos_camara, proyectar_capacidad
+from core.fechas_entrega import miercoles_semana_siguiente, semanas_hasta_recepcion
+from core.costos_mix import calcular_costos_mix
+from core.presentacion import formato_bultos, formatear_bultos
+
+
+class FormatoBultosTests(unittest.TestCase):
+    def test_enteros_y_precision_original(self):
+        datos = pd.DataFrame({'Tránsito incluido (bultos)':[628.183333,1247.6979,-1.6,None], 'Stock físico (eq)':[.4,.2,.1,.5]})
+        original = datos.copy(deep=True)
+        visible = formatear_bultos(datos)
+        self.assertEqual(visible['Tránsito incluido (bultos)'].tolist(),['628','1.248','-2','—'])
+        pd.testing.assert_frame_equal(datos,original)
+        pd.testing.assert_series_equal(visible['Stock físico (eq)'],original['Stock físico (eq)'])
+        self.assertEqual(formato_bultos(-.1),'0')
+
+
+class FechaEntregaTests(unittest.TestCase):
+    def test_miercoles_siguiente_para_toda_la_semana_y_cambio_ano(self):
+        for dia in range(7):
+            self.assertEqual(miercoles_semana_siguiente(date(2026,11,16)+timedelta(days=dia)),date(2026,11,25))
+        self.assertEqual(miercoles_semana_siguiente(date(2026,12,31)),date(2027,1,6))
+
+    def test_horizonte_desde_stock_y_fecha_editada(self):
+        self.assertEqual(semanas_hasta_recepcion(date(2026,11,16),date(2026,11,25)),9/7)
+        self.assertEqual(semanas_hasta_recepcion(date(2026,11,16),date(2026,11,18)),2/7)
+        self.assertEqual(semanas_hasta_recepcion(date(2026,11,16),date(2026,11,16)),0)
+        with self.assertRaises(ValueError):
+            semanas_hasta_recepcion(date(2026,11,16),date(2026,11,15))
 
 
 class EstadoTests(unittest.TestCase):
@@ -162,6 +191,31 @@ class ArchivosRealesTests(unittest.TestCase):
         self.assertEqual(len(r['pedido']),95)
         self.assertEqual(r['valor_pedido_total'],5007851)
         self.assertEqual(int(r['pedido']['Packs a Comprar'].sum()),185)
+
+    def test_omisiones_guardadas_excluidas_de_costos_y_alertas(self):
+        omisiones = pd.read_csv(ROOT/'data/Omisiones_Futuros_Pedidos.csv').to_dict('records')
+        args = (self.args['sabores_file'],self.args['data_file'],self.args['maestro_file'],self.args['carrito_file'])
+        _,antes = calcular_costos_mix(*args)
+        indicadores,despues = calcular_costos_mix(*args,omisiones=omisiones)
+        omitidos = {motor.normalize(f['producto_base']) for f in omisiones}
+        esperados = antes[~antes['Producto'].isin(omitidos)]
+        pd.testing.assert_frame_equal(despues.reset_index(drop=True),esperados.reset_index(drop=True))
+        self.assertFalse(set(despues['Producto']) & omitidos)
+        self.assertEqual(int(indicadores.query('Grupo == "General"')['Productos detectados'].iloc[0]),len(esperados))
+
+    def test_omitir_con_ventas_recalcula_costo_y_cobertura_y_reincluir_restaura(self):
+        args = (self.args['sabores_file'],self.args['data_file'],self.args['maestro_file'],self.args['carrito_file'])
+        original,detalle = calcular_costos_mix(*args)
+        producto = detalle[detalle['Costo reposición'].gt(0) & detalle['Kilos vendidos'].gt(0)].iloc[0]['Producto']
+        filtrado,d = calcular_costos_mix(*args,omisiones=[{'producto_base':producto.upper()}])
+        self.assertNotIn(producto,set(d['Producto']))
+        ok = d[d['Costo reposición'].notna() & d['Kilos vendidos'].gt(0)]
+        general = filtrado.set_index('Grupo').loc['General']
+        self.assertAlmostEqual(general['Costo de reposición'],round(float(ok['Costo reposición'].sum()),2))
+        self.assertAlmostEqual(general['Kilos detectados (conocidos)'],round(float(d.loc[d['Kilos vendidos'].gt(0),'Kilos vendidos'].sum()),3))
+        restaurado,det_restaurado = calcular_costos_mix(*args,omisiones=[])
+        pd.testing.assert_frame_equal(original,restaurado)
+        pd.testing.assert_frame_equal(detalle,det_restaurado)
 
 
 if __name__ == '__main__':
