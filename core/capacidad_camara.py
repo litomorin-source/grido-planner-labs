@@ -51,8 +51,76 @@ def leer_bultos_stock(stock_path):
     }
 
 
+def preparar_movimientos_camara(stock_path, maestro_path):
+    """Separa físico/tránsito con las equivalencias del maestro original.
+
+    Las omisiones de compra no eliminan mercadería de la cámara. Un artículo
+    sin equivalencia queda pendiente, nunca se le inventa un volumen.
+    """
+    import motor
+    productos = motor.load_productos(maestro_path)
+    productos_map = productos.set_index("Producto Base").to_dict(orient="index")
+    aliases = motor.load_aliases(maestro_path)
+    alias_map = {r["Alias Normalizado"]: r.to_dict() for _, r in aliases.iterrows()}
+    filas = leer_bultos_stock(stock_path)["filas"].copy()
+    for col in ("Stock", "Tránsito"):
+        filas[col] = _decimal_ar(filas[col]) if col in filas else 0.0
+    resultado = []
+    for _, row in filas.iterrows():
+        raw = str(row["Item"])
+        info = motor.alias_lookup(raw, alias_map)
+        base = info["Producto Base"]
+        minima = motor.safe_num(productos_map.get(base, {}).get("Compra Mínima"), 0)
+        fisico, _ = motor.convert_quantity(raw, base, row["Stock"], info.get("Tipo Presentación", ""), info.get("Pack Detectado"), productos_map)
+        transito, _ = motor.convert_quantity(raw, base, row["Tránsito"], info.get("Tipo Presentación", ""), info.get("Pack Detectado"), productos_map)
+        resultado.append({"Producto": base, "Stock físico (eq)": fisico,
+                          "Tránsito (eq)": transito, "Compra Mínima": minima,
+                          "Tránsito sin conversión": int(minima <= 0 and row["Tránsito"] != 0)})
+    df = pd.DataFrame(resultado, columns=["Producto", "Stock físico (eq)", "Tránsito (eq)", "Compra Mínima", "Tránsito sin conversión"])
+    return df.groupby("Producto", as_index=False).agg({
+        "Stock físico (eq)": "sum", "Tránsito (eq)": "sum", "Compra Mínima": "first",
+        "Tránsito sin conversión": "sum",
+    })
+
+
+def _proyectar_con_movimientos(pedido, movimientos, bultos_actuales, dias, semanas, capacidad, incluir_transito):
+    if dias <= 0 or semanas < 0 or capacidad <= 0:
+        raise ValueError("Revisá días analizados, tiempo de reposición y capacidad.")
+    ventas_col = next((c for c in pedido if c.startswith("Ventas ") and c.endswith(" días")), None)
+    if ventas_col is None:
+        raise ValueError("No se encontró la columna de ventas del período.")
+    grupos = {"Helado", "Bombones", "Familiar", "Líneas Especiales C. Heladas",
+              "Palitos", "Postres", "Tentación", "Tortas", *GRUPOS_CONGELADOS}
+    p = pedido[pedido["Grupo"].isin(grupos) | pedido["Producto"].isin(movimientos["Producto"])].copy()
+    p = p.groupby("Producto", as_index=False).agg({ventas_col: "sum", "Packs a Comprar": "sum", "Compra Mínima": "first"})
+    df = movimientos.merge(p, on="Producto", how="outer", suffixes=("", " pedido"))
+    df["Compra Mínima"] = df["Compra Mínima"].fillna(df["Compra Mínima pedido"])
+    for col in ("Stock físico (eq)", "Tránsito (eq)", "Tránsito sin conversión", ventas_col, "Packs a Comprar"):
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    factor = df["Compra Mínima"].where(df["Compra Mínima"].gt(0))
+    consumo_eq = pd.concat([df[ventas_col].clip(lower=0) / dias * 7 * semanas,
+                            df["Stock físico (eq)"].clip(lower=0)], axis=1).min(axis=1)
+    df["Consumo descontado (bultos)"] = consumo_eq / factor
+    df["Tránsito incluido (bultos)"] = df["Tránsito (eq)"] / factor if incluir_transito else 0.0
+    df["Bultos a recibir"] = df["Packs a Comprar"].clip(lower=0)
+    consumo = float(df["Consumo descontado (bultos)"].sum())
+    transito = float(df["Tránsito incluido (bultos)"].sum())
+    compra = float(df["Bultos a recibir"].sum())
+    total = float(bultos_actuales) - consumo + transito + compra
+    return {
+        "dias_hasta_recepcion": semanas * 7, "consumo_esperado_bultos": consumo,
+        "pedido_bultos": compra, "transito_bultos": transito,
+        "transito_sin_conversion": int(df["Tránsito sin conversión"].sum()) if incluir_transito else 0,
+        "bultos_al_recibir": total, "capacidad_bultos": capacidad,
+        "ocupacion_pct": total / capacidad * 100,
+        "sin_conversion": int((factor.isna() & (df["Stock físico (eq)"].ne(0) | df["Tránsito (eq)"].ne(0) | df["Packs a Comprar"].gt(0))).sum()),
+        "detalle": df.drop(columns=["Compra Mínima pedido"]),
+    }
+
+
 def proyectar_capacidad(pedido, bultos_actuales, dias_analizados, semanas_reposicion,
-                        capacidad_maxima=CAPACIDAD_REFERENCIA):
+                        capacidad_maxima=CAPACIDAD_REFERENCIA, movimientos_stock=None,
+                        incluir_transito=True):
     """Estima mercadería que queda al recibir, con el mix vigente del pedido.
 
     Para cada producto se descuenta como máximo el stock neto positivo de ese
@@ -61,6 +129,10 @@ def proyectar_capacidad(pedido, bultos_actuales, dias_analizados, semanas_reposi
     """
     if pedido is None or pedido.empty:
         raise ValueError("Generá un pedido primero para proyectar la recepción.")
+    if movimientos_stock is not None:
+        return _proyectar_con_movimientos(pedido, movimientos_stock, float(bultos_actuales),
+                                         float(dias_analizados), float(semanas_reposicion),
+                                         float(capacidad_maxima), incluir_transito)
     dias = float(semanas_reposicion) * 7.0
     if dias_analizados <= 0 or dias < 0:
         raise ValueError("Revisá los días analizados y el tiempo de reposición.")

@@ -19,7 +19,8 @@ from core.validators import validar_maestro, validar_carrito
 from core.version import APP_VERSION
 from core.maestro_diff import comparar_maestros
 from core.costos_mix import calcular_costos_mix
-from core.capacidad_camara import leer_bultos_stock, proyectar_capacidad, CAPACIDAD_REFERENCIA
+from core.estado_analisis import huella_analisis, invalidar_si_cambio
+from core.capacidad_camara import preparar_movimientos_camara, leer_bultos_stock, proyectar_capacidad, CAPACIDAD_REFERENCIA
 
 from motor import (
     procesar_archivos,
@@ -38,7 +39,7 @@ HISTORIAL_STOCK_PATH = "data/Historial_Valorizaciones_Stock.csv"
 OMISIONES_PEDIDO_PATH = "data/Omisiones_Futuros_Pedidos.csv"
 COLUMNAS_HISTORIAL_STOCK = [
     "id", "fecha_hora", "fecha_stock", "nombre_archivo", "valor_stock", "archivo_stock_sha256",
-    "cantidad_unidades", "detalle_categorias_json", "bultos_netos"
+    "cantidad_unidades", "detalle_categorias_json", "bultos_netos", "valorizacion_completa"
 ]
 
 
@@ -199,7 +200,7 @@ def escribir_historial_stock(github, filas, descripcion):
     return True, None
 
 
-def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo, detalle_stock=None, categorias_stock=None, bultos_netos=None):
+def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo, detalle_stock=None, categorias_stock=None, bultos_netos=None, valorizacion_completa=True):
     fecha_stock = fecha_desde_nombre_stock(nombre_archivo)
     if fecha_stock is None:
         return False, ("El nombre del archivo no tiene el formato esperado "
@@ -226,6 +227,7 @@ def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo,
         "archivo_stock_sha256": hashlib.sha256(stock_bytes).hexdigest(),
         "cantidad_unidades": cantidad_unidades,
         "detalle_categorias_json": detalle_categorias_json,
+        "valorizacion_completa": "Sí" if valorizacion_completa else "No",
         "bultos_netos": "" if bultos_netos is None else str(round(float(bultos_netos), 3)),
     })
     ok, msg = escribir_historial_stock(
@@ -267,6 +269,7 @@ def mostrar_historial_stock(github):
             "Registrado el": df["fecha_hora_parseada"].apply(fecha_visible),
             "Archivo": df["nombre_archivo"].fillna("").replace("", "Archivo anterior sin nombre"),
             "Valorización del stock": df["valor_stock"].apply(formato_moneda_ar),
+            "Valorización completa": df["valorizacion_completa"].fillna("").replace("", "Sin verificar"),
             "Unidades equivalentes": df["cantidad_unidades"].apply(lambda v: f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if pd.notna(v) else "—"),
             "Bultos netos": df["bultos_netos"].apply(lambda v: f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if pd.notna(v) else "—"),
         })
@@ -282,6 +285,7 @@ def mostrar_historial_stock(github):
             ).set_index("Fecha")
             st.markdown("**Valorización del stock ($)**")
             st.line_chart(con_pesos, use_container_width=True)
+            st.caption("Las valorizaciones incompletas son subtotales conocidos; consultá su estado en la tabla. Los registros anteriores figuran sin verificar.")
 
             con_unidades = graficos[["fecha_orden", "cantidad_unidades"]].dropna().rename(
                 columns={"fecha_orden": "Fecha", "cantidad_unidades": "Unidades equivalentes"}
@@ -913,9 +917,14 @@ def render_diagnostico_pedido(result):
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Productos detectados", len(pedido))
     m2.metric("Packs sugeridos", total_packs)
-    m3.metric("Valor pedido", formato_moneda_ar(valor_pedido_total))
-    m4.metric("Valor stock", formato_moneda_ar(valor_stock_total))
+    m3.metric("Subtotal pedido conocido" if result.get("pedido_valorizacion_incompleta") else "Valor pedido", formato_moneda_ar(valor_pedido_total))
+    m4.metric("Subtotal stock conocido" if result.get("stock_valorizacion_incompleta") else "Valor stock", formato_moneda_ar(valor_stock_total))
 
+    sin_precio = result.get("sin_precio")
+    if sin_precio is not None and not sin_precio.empty:
+        st.warning("Hay productos sin precio válido. Los importes mostrados suman solo los productos valorizados.")
+        with st.expander("Revisar productos sin precio", expanded=True):
+            st.dataframe(formatear_importes_informe(sin_precio[["Producto", "Código Compra", "Stock", "Packs a Comprar"]]), hide_index=True)
     a1, a2, a3, a4 = st.columns(4)
     a1.metric("Stock negativo", len(stock_negativo) if stock_negativo is not None else 0)
     a2.metric("Sin clasificar", len(sin_clasificar) if sin_clasificar is not None else 0)
@@ -1029,21 +1038,24 @@ def render_simulador_parametros(snapshot, key_prefix="sim"):
             a_nombre = st.text_input("Nombre A", value="Conservador", key=f"{key_prefix}_a_nombre")
             a_sem = st.number_input("Semanas objetivo A", min_value=0.5, max_value=12.0, value=max(float(base_params["Semanas objetivo"]) - 1, 0.5), step=0.5, key=f"{key_prefix}_a_sem")
             a_rep = st.number_input("Reposición A", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key=f"{key_prefix}_a_rep")
-            a_dias = st.number_input("Días A", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key=f"{key_prefix}_a_dias")
+            a_dias = int(base_params["Días analizados"])
+            st.caption(f"Período del informe: {a_dias} días (se conserva en los tres escenarios)")
 
         with c2:
             st.subheader("Escenario B")
             b_nombre = st.text_input("Nombre B", value="Actual", key=f"{key_prefix}_b_nombre")
             b_sem = st.number_input("Semanas objetivo B", min_value=0.5, max_value=12.0, value=float(base_params["Semanas objetivo"]), step=0.5, key=f"{key_prefix}_b_sem")
             b_rep = st.number_input("Reposición B", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key=f"{key_prefix}_b_rep")
-            b_dias = st.number_input("Días B", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key=f"{key_prefix}_b_dias")
+            b_dias = int(base_params["Días analizados"])
+            st.caption(f"Período del informe: {b_dias} días (se conserva en los tres escenarios)")
 
         with c3:
             st.subheader("Escenario C")
             c_nombre = st.text_input("Nombre C", value="Mayor cobertura", key=f"{key_prefix}_c_nombre")
             c_sem = st.number_input("Semanas objetivo C", min_value=0.5, max_value=12.0, value=min(float(base_params["Semanas objetivo"]) + 1, 12.0), step=0.5, key=f"{key_prefix}_c_sem")
             c_rep = st.number_input("Reposición C", min_value=0.0, max_value=8.0, value=float(base_params["Tiempo de reposición"]), step=0.5, key=f"{key_prefix}_c_rep")
-            c_dias = st.number_input("Días C", min_value=1, max_value=60, value=int(base_params["Días analizados"]), step=1, key=f"{key_prefix}_c_dias")
+            c_dias = int(base_params["Días analizados"])
+            st.caption(f"Período del informe: {c_dias} días (se conserva en los tres escenarios)")
 
     if not st.button("SIMULAR ESCENARIOS", use_container_width=True, key=f"{key_prefix}_button_1"):
         return
@@ -1102,6 +1114,8 @@ def render_simulador_parametros(snapshot, key_prefix="sim"):
                     "Packs sugeridos": metrics["packs_sugeridos"],
                     "Valor pedido": int(metrics["valor_pedido"]),
                     "Valor stock": int(metrics["valor_stock"]),
+                    "Valor pedido completo": not res.get("pedido_valorizacion_incompleta", False),
+                    "Valor stock completo": not res.get("stock_valorizacion_incompleta", False),
                 })
 
                 tmp_pedido = res["pedido"].copy()
@@ -1169,10 +1183,12 @@ def render_simulador_parametros(snapshot, key_prefix="sim"):
 def _descargas_pedido_aisladas():
     """Fragmento independiente: descargar no reejecuta los cálculos ni el formulario."""
     estado = st.session_state.get("pedido_descargas_labs")
-    if not estado:
+    if not estado or estado.get("huella") != st.session_state.get("huella_insumos_labs"):
         return
     with st.container(border=True):
         st.subheader("Descargas del último pedido generado")
+        if estado["result"].get("pedido_valorizacion_incompleta"):
+            st.warning("El importe del pedido está incompleto. Revisá los productos sin precio antes de comprar.")
         col_pedido, col_carrito = st.columns(2)
         with col_pedido:
             st.download_button(
@@ -1382,7 +1398,7 @@ def render_carga_inteligente():
 
 def render_generar_pedido(github):
     st.header("Panel de planificación")
-    st.caption("Labs 2.6.1 · Carga flexible, cobertura de kilos y faltantes unificados. Producción no se modifica.")
+    st.caption(f"{APP_VERSION} · Pedidos vigentes, precios identificados y tránsito en cámara.")
     mensaje_omision = st.session_state.pop("mensaje_omision_pedido", None)
     if mensaje_omision:
         st.success(mensaje_omision)
@@ -1485,6 +1501,30 @@ def render_generar_pedido(github):
                     ready = False
                     st.info("📄 Power BI: pendiente")
 
+        # Se verifica ANTES de mostrar cualquier resultado o descarga persistente.
+        omisiones_ok = True
+        try:
+            omisiones_vigentes = leer_omisiones_pedido(github)
+        except Exception as exc:
+            omisiones_ok = False
+            ready = False
+            omisiones_vigentes = []
+            st.session_state.pop("pedido_descargas_labs", None)
+            st.session_state.pop("ultimo_analisis_snapshot", None)
+            with tab_pedido:
+                st.error(f"No pude verificar las omisiones. Reintentá antes de generar o descargar un pedido: {exc}")
+        params_actuales = {"Semanas objetivo": semanas_objetivo,
+                           "Tiempo de reposición": tiempo_reposicion,
+                           "Días analizados": dias_analizados}
+        huella_actual = huella_analisis(
+            {**{k: v.getvalue() for k, v in archivos.items()},
+             "maestro": maestro_path.read_bytes(), "carrito": carrito_path.read_bytes()},
+            params_actuales, omisiones_vigentes,
+        )
+        if invalidar_si_cambio(st.session_state, huella_actual):
+            with tab_pedido:
+                st.warning("Los archivos, parámetros o las omisiones cambiaron. Volvé a ANALIZAR Y GENERAR PEDIDO para habilitar las descargas actualizadas.")
+
         with tab_stock:
             # La capacidad se presenta en cuanto se carga el stock, sin exigir el
             # resto de los archivos ni ejecutar el cálculo del pedido.
@@ -1527,13 +1567,19 @@ def render_generar_pedido(github):
                         guardado, resultado_guardado = guardar_valorizacion_stock(
                             github, valor_total_stock, stock_file.getvalue(), stock_file.name,
                             detalle_stock=result_stock.get("detalle"), categorias_stock=result_stock.get("categoria"),
-                            bultos_netos=capacidad_stock["netos"] if capacidad_stock is not None else None
+                            bultos_netos=capacidad_stock["netos"] if capacidad_stock is not None else None,
+                            valorizacion_completa=not result_stock.get("stock_valorizacion_incompleta", False),
                         )
                         if guardado:
                             st.success(f"Valorización guardada en el historial · {resultado_guardado}")
                         else:
                             st.error(f"El informe se generó, pero NO se guardó en el historial: {resultado_guardado}")
-                        st.metric("Valor stock actual", formato_moneda_ar(valor_total_stock))
+                        incompleto = result_stock.get("stock_valorizacion_incompleta", False)
+                        st.metric("Subtotal stock conocido" if incompleto else "Valor stock actual", formato_moneda_ar(valor_total_stock))
+                        if incompleto:
+                            st.warning("Valorización incompleta: hay stock sin precio. El historial registra este importe como subtotal conocido.")
+                            st.dataframe(formatear_importes_informe(result_stock["sin_precio"]), hide_index=True)
+
                         if result_stock.get("categoria") is not None:
                             with st.expander("Ver valorización por categoría", expanded=False):
                                 df_categoria = result_stock["categoria"].copy()
@@ -1667,7 +1713,6 @@ def render_generar_pedido(github):
                 if st.button("ANALIZAR Y GENERAR PEDIDO", type="primary", use_container_width=True):
                     output = tmp / "Pedido_Final.xlsx"
                     try:
-                        omisiones_vigentes = leer_omisiones_pedido(github)
                         st.session_state["omisiones_pedido_vigentes"] = omisiones_vigentes
                         maestro_pedido = maestro_para_pedido(maestro_path, tmp, omisiones_vigentes)
                         result = procesar_archivos(
@@ -1715,6 +1760,7 @@ def render_generar_pedido(github):
                         except Exception as exc_importacion:
                             carrito_error = str(exc_importacion)
                         st.session_state["pedido_descargas_labs"] = {
+                            "huella": huella_actual,
                             "pedido_bytes": pedido_bytes,
                             "carrito_bytes": carrito_bytes,
                             "carrito_error": carrito_error,
@@ -1752,26 +1798,34 @@ def render_generar_pedido(github):
                         st.warning("El stock cargado cambió desde el análisis. Volvé a generar el pedido para proyectar la capacidad correctamente.")
                     else:
                         try:
+                            incluir_transito = st.checkbox(
+                                "El tránsito pendiente llega antes o junto con este pedido",
+                                value=True, key="transito_antes_recepcion",
+                            )
+                            movimientos = preparar_movimientos_camara(paths["stock"], maestro_path)
                             proy = proyectar_capacidad(
                                 pedido, capacidad_stock["netos"],
                                 estado_pedido.get("dias_analizados_capacidad", dias_analizados),
                                 estado_pedido.get("semanas_reposicion_capacidad", tiempo_reposicion),
-                                limite_bultos,
+                                limite_bultos, movimientos_stock=movimientos, incluir_transito=incluir_transito,
                             )
-                            pc1, pc2, pc3, pc4 = st.columns(4)
+                            pc1, pc2, pc3, pc4, pc5 = st.columns(5)
                             pc1.metric("Bultos actuales", f"{capacidad_stock['netos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                             pc2.metric(f"Consumo próximo {proy['dias_hasta_recepcion']:g} días", f"−{proy['consumo_esperado_bultos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                             pc3.metric("Bultos de la compra", f"+{proy['pedido_bultos']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-                            pc4.metric("Bultos al recibir", f"{proy['bultos_al_recibir']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                            pc5.metric("Tránsito incluido", f"+{proy['transito_bultos']:.2f}")
+                            pc4.metric("Bultos al recibir (conocidos)", f"{proy['bultos_al_recibir']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                             ocup = proy["ocupacion_pct"]
                             st.progress(max(0.0, min(1.0, ocup / 100)), text=f"Ocupación estimada al recibir: {ocup:.1f}% · Referencia: {limite_bultos:.2f} bultos")
+                            if proy["transito_sin_conversion"]:
+                                st.error("Hay tránsito sin equivalencia de bultos. La ocupación está incompleta: no se puede confirmar que haya espacio suficiente.")
                             if ocup > 100:
                                 st.error("El pedido supera la capacidad de referencia. Revisá cantidades y almacenamiento antes de comprar.")
                             elif ocup >= 90:
                                 st.warning("La recepción deja la cámara cerca del límite de capacidad.")
-                            else:
+                            elif not proy["transito_sin_conversion"]:
                                 st.success("La recepción queda dentro de la capacidad de referencia.")
-                            st.caption("El consumo se calcula producto por producto según el mix y se limita al stock disponible de cada uno. No se descuentan insumos, descartables ni ventas no identificadas. La capacidad es una referencia operativa, no un límite técnico certificado.")
+                            st.caption("El consumo se calcula producto por producto según el mix y se limita al stock disponible de cada uno. No se descuentan insumos, descartables ni ventas no identificadas. Se suma el tránsito según la opción indicada. Por prudencia, se descuenta consumo solo contra stock físico; no se anticipan ventas de entregas pendientes. La capacidad es una referencia operativa, no un límite técnico certificado.")
                             if proy["sin_conversion"]:
                                 st.warning(f"{proy['sin_conversion']} productos del pedido no tienen equivalencia/código suficiente para proyectar sus bultos. Revisá el detalle.")
                             with st.expander("Auditar bultos del pedido y consumo estimado", expanded=False):
@@ -1788,8 +1842,8 @@ def render_generar_pedido(github):
                     m4.metric("Posibles faltantes", len(posibles_faltantes) if posibles_faltantes is not None else 0)
                     m5.metric("Packs sugeridos", int(pedido["Packs a Comprar"].fillna(0).sum()))
                     v1, v2 = st.columns(2)
-                    v1.metric("Valor stock actual", formato_moneda_ar(result.get("valor_stock_total", 0)))
-                    v2.metric("Valor pedido sugerido", formato_moneda_ar(result.get("valor_pedido_total", 0)))
+                    v1.metric("Subtotal stock conocido" if result.get("stock_valorizacion_incompleta") else "Valor stock actual", formato_moneda_ar(result.get("valor_stock_total", 0)))
+                    v2.metric("Subtotal pedido conocido" if result.get("pedido_valorizacion_incompleta") else "Valor pedido sugerido", formato_moneda_ar(result.get("valor_pedido_total", 0)))
                     if result.get("valorizacion_categoria") is not None:
                         with st.expander("Ver valorización por categoría", expanded=False):
                             st.dataframe(formatear_importes_informe(result["valorizacion_categoria"]), use_container_width=True)

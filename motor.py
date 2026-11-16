@@ -548,13 +548,13 @@ def procesar_costo_stock(stock_file, maestro_file, output_file, carrito_file=DEF
 
     final["Compra Mínima"] = pd.to_numeric(final["Compra Mínima"], errors="coerce").fillna(1)
     final["Código Compra Normalizado"] = final["Código Compra"].apply(normalizar_codigo_compra)
-    final["Precio Pack"] = final["Código Compra Normalizado"].map(precios_carrito).fillna(0).astype(int)
+    final["Precio Pack"] = final["Código Compra Normalizado"].map(precios_carrito).where(lambda x: x > 0).astype("Int64")
 
     final["Costo Unitario Eq"] = final.apply(
         lambda r: r["Precio Pack"] / r["Compra Mínima"] if r["Compra Mínima"] else 0,
         axis=1
     )
-    final["Valor Stock Actual"] = (final["Stock"] * final["Costo Unitario Eq"]).fillna(0).astype(int)
+    final["Valor Stock Actual"] = (final["Stock"] * final["Costo Unitario Eq"]).where(final["Stock"].ne(0), 0).apply(lambda x: int(x) if pd.notna(x) else pd.NA).astype("Int64")
 
     detalle = final[[
         "Grupo",
@@ -583,15 +583,17 @@ def procesar_costo_stock(stock_file, maestro_file, output_file, carrito_file=DEF
 
     stock_negativo = detalle[pd.to_numeric(detalle["Stock"], errors="coerce").fillna(0) < 0].copy()
 
+    sin_precio = detalle[detalle["Precio Pack"].isna()].copy()
+    stock_incompleto = bool(sin_precio["Stock"].ne(0).any())
     resumen = pd.DataFrame({
         "Concepto": [
-            "Valor stock actual",
+            "Subtotal stock conocido (incompleto)" if stock_incompleto else "Valor stock actual",
             "Productos valorizados",
             "Productos con stock negativo",
         ],
         "Valor": [
             int(detalle["Valor Stock Actual"].sum()),
-            len(detalle),
+            int(detalle["Precio Pack"].notna().sum()),
             len(stock_negativo),
         ]
     })
@@ -602,6 +604,7 @@ def procesar_costo_stock(stock_file, maestro_file, output_file, carrito_file=DEF
             "Este informe valoriza el stock actual sin requerir archivos de ventas.",
             "Usa el archivo de stock, el maestro de productos y el archivo de carrito/precios.",
             "Precio pack se toma del carrito/precios por código de compra.",
+            "Precios ausentes o no positivos quedan vacíos; los totales suman solo importes conocidos. Revisar Sin precio.",
             "Valor stock actual = Stock × (Precio pack / Compra mínima).",
             "Si hay productos con stock negativo, deben revisarse porque pueden afectar la valorización.",
         ]
@@ -609,6 +612,7 @@ def procesar_costo_stock(stock_file, maestro_file, output_file, carrito_file=DEF
 
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         resumen.to_excel(writer, index=False, sheet_name="Resumen")
+        sin_precio.to_excel(writer, index=False, sheet_name="Sin precio")
         categoria.to_excel(writer, index=False, sheet_name="Valorización categoría")
         detalle.to_excel(writer, index=False, sheet_name="Valorización producto")
         stock_negativo.to_excel(writer, index=False, sheet_name="Stock negativo")
@@ -618,6 +622,8 @@ def procesar_costo_stock(stock_file, maestro_file, output_file, carrito_file=DEF
 
     return {
         "detalle": detalle,
+        "sin_precio": sin_precio,
+        "stock_valorizacion_incompleta": stock_incompleto,
         "categoria": categoria,
         "stock_negativo": stock_negativo,
         "valor_stock_total": int(detalle["Valor Stock Actual"].sum()),
@@ -717,7 +723,7 @@ def procesar_archivos(stock_file, sabores_file, data_file, maestro_file, output_
     final["Compra Mínima"] = pd.to_numeric(final["Compra Mínima"], errors="coerce").fillna(1)
 
     final["Código Compra Normalizado"] = final["Código Compra"].apply(normalizar_codigo_compra)
-    final["Precio Pack"] = final["Código Compra Normalizado"].map(precios_carrito).fillna(0)
+    final["Precio Pack"] = final["Código Compra Normalizado"].map(precios_carrito).where(lambda x: x > 0)
 
     final["Packs a Comprar"] = final.apply(lambda r: ceil_to_int(r["Reposición necesaria"] / r["Compra Mínima"]) if r["Reposición necesaria"] > 0 else 0, axis=1)
     final["Unidades Finales"] = final["Packs a Comprar"] * final["Compra Mínima"]
@@ -726,9 +732,9 @@ def procesar_archivos(stock_file, sabores_file, data_file, maestro_file, output_
         lambda r: r["Precio Pack"] / r["Compra Mínima"] if r["Compra Mínima"] else 0,
         axis=1
     )
-    final["Valor Stock Actual"] = (final["Stock"] * final["Costo Unitario Eq"]).fillna(0).astype(int)
-    final["Valor Pedido Sugerido"] = (final["Packs a Comprar"] * final["Precio Pack"]).fillna(0).astype(int)
-    final["Precio Pack"] = final["Precio Pack"].fillna(0).astype(int)
+    final["Valor Stock Actual"] = (final["Stock"] * final["Costo Unitario Eq"]).where(final["Stock"].ne(0), 0).apply(lambda x: int(x) if pd.notna(x) else pd.NA).astype("Int64")
+    final["Valor Pedido Sugerido"] = (final["Packs a Comprar"] * final["Precio Pack"]).where(final["Packs a Comprar"].ne(0), 0).apply(lambda x: int(x) if pd.notna(x) else pd.NA).astype("Int64")
+    final["Precio Pack"] = final["Precio Pack"].astype("Int64")
 
     all_detected = pd.concat([
         stock_rows[["Origen", "Grupo", "SubRubro", "Producto Base", "Nombre original", "Regla Conversión", "Alias Encontrado"]],
@@ -801,7 +807,14 @@ def procesar_archivos(stock_file, sabores_file, data_file, maestro_file, output_
         "Producto Compra",
     ]].copy().sort_values("Valor Stock Actual", ascending=False)
 
+    sin_precio = pedido[pedido["Precio Pack"].isna()].copy()
+    pedido_incompleto = bool(sin_precio["Packs a Comprar"].gt(0).any())
+    stock_incompleto = bool(sin_precio["Stock"].ne(0).any())
     advertencias = []
+    if pedido_incompleto:
+        advertencias.append("⚠️ VALOR PEDIDO INCOMPLETO: hay compras sin precio. El importe es un subtotal conocido.")
+    if stock_incompleto:
+        advertencias.append("⚠️ VALOR STOCK INCOMPLETO: hay existencias sin precio. El importe es un subtotal conocido.")
 
     if len(stock_negativo) > 0:
         advertencias.append(f"⚠️ STOCK NEGATIVO DETECTADO: {len(stock_negativo)} productos. Revisar hoja 'Stock negativo'.")
@@ -838,6 +851,7 @@ def procesar_archivos(stock_file, sabores_file, data_file, maestro_file, output_
             "Packs a comprar = redondeo hacia arriba(Reposición necesaria / Compra mínima)",
             "Unidades finales = Packs a comprar × Compra mínima",
             "Valor pedido sugerido = Packs a comprar × Precio pack",
+            "Precios ausentes o no positivos quedan vacíos; los totales suman solo importes conocidos. Revisar Sin precio.",
             "Valor stock actual = Stock × (Precio pack / Compra mínima)",
             "",
             "ACLARACIÓN",
@@ -867,12 +881,16 @@ def procesar_archivos(stock_file, sabores_file, data_file, maestro_file, output_
         stock_negativo.to_excel(writer, index=False, sheet_name="Stock negativo")
         posibles_faltantes.to_excel(writer, index=False, sheet_name="Posibles faltantes")
         sin_clasificar.to_excel(writer, index=False, sheet_name="Sin clasificar")
+        sin_precio.to_excel(writer, index=False, sheet_name="Sin precio")
         explicacion.to_excel(writer, index=False, sheet_name="Explicación")
 
     format_workbook(output_file)
 
     return {
         "pedido": pedido,
+        "sin_precio": sin_precio,
+        "pedido_valorizacion_incompleta": pedido_incompleto,
+        "stock_valorizacion_incompleta": stock_incompleto,
         "stock_negativo": stock_negativo,
         "posibles_faltantes": posibles_faltantes,
         "sin_clasificar": sin_clasificar,
