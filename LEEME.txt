@@ -1,3 +1,12 @@
-Labs 2.6.1
-Reemplazar ui/home.py, core/costos_mix.py y core/version.py.
-Costos funciona con Cajas + Mix sin Stock. Validaciones pasan a Configuración. Se agrega cobertura de kilos conocidos y tabla unificada/exportable de productos sin cobertura. No modificar Maestro, Carrito ni datos.
+GridoPlanner Labs 2.6.2 - Omisiones sin reiniciar el pedido
+
+Reemplazar en GitHub Labs, NO produccion:
+ - ui/home.py
+ - core/version.py
+
+Al omitir o volver a incluir productos, el analisis actual sigue visible y permite
+seguir administrando omisiones sin regenerar inmediatamente. Las descargas y
+el simulador del pedido anterior quedan bloqueados hasta pulsar
+ANALIZAR Y GENERAR PEDIDO. La lista de posibles faltantes oculta las
+omisiones guardadas. El historial y el Maestro no se modifican.
+Cambios se aplican al siguiente analisis.
