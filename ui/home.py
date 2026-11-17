@@ -1684,7 +1684,7 @@ def render_generar_pedido(github, pagina="Pedido"):
                     # Tabla de texto ya formateado: así Streamlit no puede revertir el formato
                     # a valores numéricos mediante inferencia de tipos.
                     st.dataframe(indicadores_visibles.astype(str), use_container_width=True, hide_index=True)
-                    st.warning("El costo se calcula sobre los productos incluidos con precio y kilos válidos. Las omisiones también se excluyen de la cobertura; este importe no representa necesariamente toda la sucursal.")
+                    st.warning("El costo se calcula sobre los productos incluidos con precio y kilos válidos. Las filas sin movimiento y las omisiones se excluyen de la cobertura; este importe no representa necesariamente toda la sucursal.")
                     # Se consideran sin cobertura todos los productos que no tienen
                     # simultáneamente costo de reposición y kilos válidos.
                     costos_num = pd.to_numeric(detalle_costos["Costo reposición"], errors="coerce")
@@ -1694,7 +1694,7 @@ def render_generar_pedido(github, pagina="Pedido"):
                     ].copy()
                     st.markdown("#### Productos sin cobertura de costos")
                     if sin_cobertura.empty:
-                        st.success("Todos los productos detectados tienen costo y kilos válidos.")
+                        st.success("Todos los productos con movimiento tienen costo y kilos válidos.")
                     else:
                         st.warning(
                             f"{len(sin_cobertura)} productos sin cobertura completa, reunidos en una sola tabla. "

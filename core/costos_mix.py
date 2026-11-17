@@ -69,6 +69,11 @@ def calcular_costos_mix(sabores_file, data_file, maestro_file, carrito_file, omi
     kilos_map = dict(zip(k['clave'], k['Kilos vendidos']))
     detalle.loc[es_mix,'Kilos vendidos']=detalle.loc[es_mix,'clave'].apply(lambda nombre: float(kilos_map.get(nombre, float('nan'))))
     detalle['Kilos vendidos']=pd.to_numeric(detalle['Kilos vendidos'],errors='coerce')
+    # La cobertura mide movimientos del período, no el catálogo de nombres.
+    # Conservar cantidades o kilos no nulos (también devoluciones) para revisión.
+    sin_movimiento = (detalle['Unidades equivalentes'].eq(0)
+                      & detalle['Kilos vendidos'].fillna(0).eq(0))
+    detalle = detalle.loc[~sin_movimiento].copy()
     detalle.loc[(detalle['Kilos vendidos']<=0) | detalle['Kilos vendidos'].isna(),'Observación'] = detalle['Observación'].fillna('') + ' Kilos no disponibles'
     resultados=[]
     for grupo,d in [('Granel',detalle[detalle.Grupo=='Granel']),('Envasados',detalle[detalle.Grupo=='Envasados']),('General',detalle)]:

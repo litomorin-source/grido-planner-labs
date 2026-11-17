@@ -1,0 +1,4 @@
+Actualización acumulativa sobre Labs 2.9.0. Subir el contenido respetando las carpetas existentes. No reemplaza Maestro ni Carrito operativo.
+Costos: filas sin cantidad ni kilos de movimiento quedan fuera del detalle analizado y de la cobertura. Faltantes con movimiento siguen visibles. Pedidos y cámara no cambian.
+Prueba real: Alfajor conserva 40 cajas y 82 unidades (26,56 kg).
+Después de actualizar, volver a calcular Costos.
