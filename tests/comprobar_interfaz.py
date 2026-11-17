@@ -33,8 +33,8 @@ verificar()
 next(b for b in app.button if b.label == 'Generar pedido').click().run()
 verificar()
 estado = app.session_state['pedido_descargas_labs']
-assert estado['result']['pedido']['Packs a Comprar'].sum() == 185
-assert estado['result']['valor_pedido_total'] == 5007851
+assert estado['result']['pedido']['Packs a Comprar'].sum() == 176
+assert estado['result']['valor_pedido_total'] == 4885064
 descarga = estado['pedido_bytes']
 assert descarga and estado['carrito_bytes']
 for pagina in ['Stock y cámara', 'Costos', 'Configuración', 'Pallets', 'Pedido']:

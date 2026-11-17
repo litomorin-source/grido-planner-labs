@@ -72,6 +72,8 @@ def grafico_historial(df):
     datos['Fecha visible'] = datos.fecha_orden.dt.strftime('%d/%m/%Y %H:%M')
     datos['Valor'] = datos[campo].round(0) if tipo=='Bultos' else datos[campo]
     datos['Estado'] = datos['valorizacion_completa'].fillna('').replace({'':'Sin verificar','No':'Subtotal incompleto','Sí':'Completo'})
+    if 'usa_costos_historicos' in datos:
+        datos.loc[datos['usa_costos_historicos'].eq('Sí'), 'Estado'] += ' · Con costos históricos'
     datos['Importe visible'] = datos['Valor'].map(lambda v: ('$ ' if tipo=='Valor del stock' else '')+f'{v:,.0f}'.replace(',','.'))
     axis = {'title':None,'labelColor':'#617487','gridColor':'#e9eff4'}
     if tipo=='Valor del stock':

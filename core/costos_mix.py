@@ -21,6 +21,9 @@ def calcular_costos_mix(sabores_file, data_file, maestro_file, carrito_file, omi
     exc.update(normalize(fila.get('producto_base', '')) for fila in (omisiones or []))
     exc.discard('')
     precios=load_precios_carrito(carrito_file)
+    from core.catalogo import resolver, precios_compatibles
+    referencias = resolver(carrito_file)
+    precios = precios_compatibles(precios, referencias, productos)
     sabores=read_sabores(sabores_file,am,pmap,exc)
     mix=read_data(data_file,load_config(maestro_file),am,pmap,exc)
 
@@ -56,7 +59,9 @@ def calcular_costos_mix(sabores_file, data_file, maestro_file, carrito_file, omi
             registros.append({'Grupo':grupo,'Producto':base,'Nombre original':r['Nombre original'],
                               'Unidades equivalentes':cantidad,'Kilos vendidos':kilos,
                               'Costo reposición':costo,'Código compra':codigo,
-                              'Observación':('Sin costo/maestro' if costo is None else '')})
+                              'Origen precio':referencias.get(codigo,{}).get('fuentes',{}).get('precio','Sin dato'),
+                              'Fecha precio':referencias.get(codigo,{}).get('fecha_precio') or 'Sin fecha informada',
+                              'Observación':('Sin costo/maestro' if costo is None else ('Usa último costo conocido; no es reposición vigente' if referencias.get(codigo,{}).get('fuentes',{}).get('precio')=='Histórico' else ''))})
     detalle=pd.DataFrame(registros)
     if detalle.empty: raise ValueError('No se detectaron ventas para calcular costos.')
     es_mix=detalle['Grupo'].eq('Envasados')

@@ -20,6 +20,7 @@ from core.version import APP_VERSION
 from core.maestro_diff import comparar_maestros
 from core.costos_mix import calcular_costos_mix
 from ui.diseno import aplicar_diseno, render_resumen, grafico_historial, SECCIONES
+from ui.carrito import render_actualizar_carrito, mostrar_referencias_stock
 from ui.productos import render_completar_productos
 from core.presentacion import formato_bultos, formatear_bultos
 from core.estado_analisis import huella_analisis, invalidar_si_cambio
@@ -43,7 +44,7 @@ HISTORIAL_STOCK_PATH = "data/Historial_Valorizaciones_Stock.csv"
 OMISIONES_PEDIDO_PATH = "data/Omisiones_Futuros_Pedidos.csv"
 COLUMNAS_HISTORIAL_STOCK = [
     "id", "fecha_hora", "fecha_stock", "nombre_archivo", "valor_stock", "archivo_stock_sha256",
-    "cantidad_unidades", "detalle_categorias_json", "bultos_netos", "valorizacion_completa"
+    "cantidad_unidades", "detalle_categorias_json", "bultos_netos", "valorizacion_completa", "usa_costos_historicos"
 ]
 
 
@@ -206,7 +207,7 @@ def escribir_historial_stock(github, filas, descripcion):
     return True, None
 
 
-def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo, detalle_stock=None, categorias_stock=None, bultos_netos=None, valorizacion_completa=True):
+def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo, detalle_stock=None, categorias_stock=None, bultos_netos=None, valorizacion_completa=True, usa_costos_historicos=False):
     fecha_stock = fecha_desde_nombre_stock(nombre_archivo)
     if fecha_stock is None:
         return False, ("El nombre del archivo no tiene el formato esperado "
@@ -234,6 +235,7 @@ def guardar_valorizacion_stock(github, valor_stock, stock_bytes, nombre_archivo,
         "cantidad_unidades": cantidad_unidades,
         "detalle_categorias_json": detalle_categorias_json,
         "valorizacion_completa": "Sí" if valorizacion_completa else "No",
+        "usa_costos_historicos": "Sí" if usa_costos_historicos else "No",
         "bultos_netos": "" if bultos_netos is None else str(round(float(bultos_netos), 3)),
     })
     ok, msg = escribir_historial_stock(
@@ -278,11 +280,12 @@ def mostrar_historial_stock(github):
             "Valorización completa": df["valorizacion_completa"].fillna("").replace("", "Sin verificar"),
             "Unidades equivalentes": df["cantidad_unidades"].apply(lambda v: f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if pd.notna(v) else "—"),
             "Bultos netos": df["bultos_netos"].map(formato_bultos),
+            "Usa costos históricos": df["usa_costos_historicos"].fillna("").replace("", "Sin registro"),
         })
         st.markdown("#### Evolución del stock")
         grafico_historial(df)
         st.markdown("#### Registros")
-        compacto = mostrar[["Fecha del stock", "Valorización del stock", "Bultos netos", "Valorización completa"]].rename(columns={"Valorización completa":"Estado"})
+        compacto = mostrar[["Fecha del stock", "Valorización del stock", "Bultos netos", "Valorización completa", "Usa costos históricos"]].rename(columns={"Valorización completa":"Estado"})
         compacto["Estado"] = compacto["Estado"].replace({"No":"Incompleto","Sí":"Completo"})
         st.dataframe(compacto, hide_index=True, use_container_width=True)
         with st.expander("Ver archivos y detalles de registro", expanded=False):
@@ -530,7 +533,10 @@ def generar_carrito_importacion(pedido, carrito_path):
     import math
 
     libro = load_workbook(carrito_path)
-    hoja = libro.active
+    from core.catalogo import HOJA
+    if HOJA in libro.sheetnames:
+        del libro[HOJA]
+    hoja = libro.worksheets[0]
     columnas = {str(c.value).strip(): c.column for c in hoja[1] if c.value is not None}
     for necesaria in ("Codigo", "Cantidad"):
         if necesaria not in columnas:
@@ -1550,6 +1556,13 @@ def render_generar_pedido(github, pagina="Pedido"):
 
             st.markdown("---")
             if pagina == "Stock y cámara" and validez["stock"]:
+                from motor import load_config, load_productos, load_aliases, load_exclusiones, read_stock
+                prod_stock = load_productos(maestro_path)
+                prod_map = prod_stock.set_index('Producto Base').to_dict('index')
+                alias_map = {r['Alias Normalizado']: dict(r) for _, r in load_aliases(maestro_path).iterrows()}
+                filas_stock = read_stock(paths['stock'], load_config(maestro_path), alias_map, prod_map, load_exclusiones(maestro_path))
+                bases_stock = set(filas_stock['Producto Base']) if not filas_stock.empty else set()
+                mostrar_referencias_stock(carrito_path, prod_stock.loc[prod_stock['Producto Base'].isin(bases_stock), 'Código Compra'])
                 render_completar_productos(github, paths["stock"], maestro_path, carrito_path, ADMIN_PIN)
             st.subheader("Informe costo stock")
             mostrar_historial_stock(github)
@@ -1570,11 +1583,15 @@ def render_generar_pedido(github, pagina="Pedido"):
                             detalle_stock=result_stock.get("detalle"), categorias_stock=result_stock.get("categoria"),
                             bultos_netos=capacidad_stock["netos"] if capacidad_stock is not None else None,
                             valorizacion_completa=not result_stock.get("stock_valorizacion_incompleta", False),
+                            usa_costos_historicos=bool(result_stock['detalle']['Origen precio'].eq('Histórico').any()),
                         )
                         if guardado:
                             st.success(f"Valorización guardada en el historial · {resultado_guardado}")
                         else:
                             st.error(f"El informe se generó, pero NO se guardó en el historial: {resultado_guardado}")
+                        detalle_referencia = result_stock.get('detalle')
+                        if detalle_referencia is not None and 'Origen precio' in detalle_referencia and detalle_referencia['Origen precio'].eq('Histórico').any():
+                            st.warning('La valorización incluye costos históricos. Revisá las fechas en Referencias catálogo del informe; los registros anteriores del historial no se recalculan.')
                         incompleto = result_stock.get("stock_valorizacion_incompleta", False)
                         st.metric("Subtotal stock conocido" if incompleto else "Valor stock actual", formato_moneda_ar(valor_total_stock))
                         if incompleto:
@@ -1639,7 +1656,7 @@ def render_generar_pedido(github, pagina="Pedido"):
             if validez["sabores"] and validez["data"]:
                 st.markdown("---")
                 st.subheader("Análisis según tu mix de ventas del período")
-                st.caption("Costo de reposición con precios actuales del Carrito; composición de las ventas según los archivos cargados. No es el CMV contable.")
+                st.caption("Costo de referencia del mix: precios actuales del Carrito y, cuando faltan, últimos datos compatibles guardados. Los históricos se identifican por producto; no son precios vigentes ni CMV contable.")
                 st.caption("Se aplica la misma lista de omisiones de Pedidos. Los productos omitidos no participan del costo ni de la cobertura de este análisis.")
                 if omisiones_vigentes:
                     with st.expander(f"Productos omitidos también en Costos ({len(omisiones_vigentes)})"):
@@ -1661,6 +1678,8 @@ def render_generar_pedido(github, pagina="Pedido"):
                     indicadores = None
                 if indicadores is not None:
                     # Forzar la conversión a cadenas locales antes de enviar la tabla a Streamlit.
+                    if 'Origen precio' in detalle_costos and detalle_costos['Origen precio'].eq('Histórico').any():
+                        st.warning('Este análisis incluye últimos costos conocidos de productos ausentes o datos pendientes. Revisá Origen precio y Fecha precio en el detalle.')
                     indicadores_visibles = _mostrar_indicadores_costos_mix(indicadores)
                     # Tabla de texto ya formateado: así Streamlit no puede revertir el formato
                     # a valores numéricos mediante inferencia de tipos.
@@ -1792,6 +1811,12 @@ def render_generar_pedido(github, pagina="Pedido"):
                     with zona_descargas:
                         _descargas_pedido_aisladas()
                     proy = None
+                    if 'Origen precio' in pedido and pedido['Origen precio'].eq('Histórico').any():
+                        st.warning('El stock incluye productos con últimos costos conocidos. Las compras usan artículos vigentes; revisá Referencias catálogo del Excel.')
+                    revisiones_compra = pedido[pedido['Observación'].str.contains('Compra pendiente|Cantidad ajustada', na=False)]
+                    if not revisiones_compra.empty:
+                        with st.expander('Compras ajustadas o pendientes por el Carrito', expanded=True):
+                            st.dataframe(revisiones_compra[['Producto','Packs a Comprar','Observación']], hide_index=True, use_container_width=True)
                     st.subheader("Espacio de cámara al recibir")
                     st.caption("Una fecha estimada para revisar el espacio de cámara. Podés ajustarla cuando coordines con el transporte.")
                     if capacidad_stock is None:
@@ -2035,24 +2060,35 @@ def render_actualizar_archivos(github):
         )
 
     with tab_carrito:
-        subir_archivo_validado(
-            label="Carrito",
-            uploader_label="Subir Modelo_de_Carrito.xlsx",
-            destino=CARRITO_GITHUB_PATH,
-            validator=validar_carrito,
-            filename="Modelo_de_Carrito.xlsx",
-            github=github,
-        )
+        render_actualizar_carrito(github)
 
     with tab_historial:
         render_historial_maestro(github)
 
+def _volver_a_planificacion():
+    st.session_state["modo_labs"] = "Usuario"
+
+
 def render_home():
-    st.sidebar.markdown("### Planificación")
-    pagina = st.sidebar.radio("Sección", list(SECCIONES), key="navegacion_labs", label_visibility="collapsed")
-    with st.sidebar.expander("Administración", expanded=False):
+    titulo = "Administración" if st.session_state.get("modo_labs") == "Administrador" else "Planificación"
+    st.sidebar.markdown(f"### {titulo}")
+    # Reservar la posición del menú para conservar el selector de modo debajo.
+    menu = st.sidebar.container()
+    with st.sidebar.expander("Cambiar modo", expanded=False):
         modo = st.radio("Modo", ["Usuario", "Administrador"], key="modo_labs")
-    aplicar_diseno(pagina if modo == "Usuario" else "Administrador", APP_VERSION)
+    if modo == "Usuario":
+        if "navegacion_labs" not in st.session_state:
+            st.session_state["navegacion_labs"] = st.session_state.get("ultima_seccion_labs", "Pedido")
+        with menu:
+            pagina = st.radio("Sección", list(SECCIONES), key="navegacion_labs", label_visibility="collapsed")
+        st.session_state["ultima_seccion_labs"] = pagina
+    else:
+        pagina = "Administrador"
+        with menu:
+            st.caption("Estás en el modo Administrador.")
+            st.button("Volver a planificación", key="volver_planificacion_labs",
+                      on_click=_volver_a_planificacion, use_container_width=True)
+    aplicar_diseno(pagina, APP_VERSION)
 
     config = get_github_config()
 

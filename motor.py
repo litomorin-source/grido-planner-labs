@@ -16,64 +16,12 @@ DEFAULT_CARRITO_FILE = Path(__file__).resolve().parent / "datos" / "Modelo_de_Ca
 
 
 def load_precios_carrito(carrito_path=DEFAULT_CARRITO_FILE):
-    """
-    Lee el archivo Modelo de Carrito.
-    Columna B: código del pack.
-    Columna I: precio del pack.
-    Devuelve dict {codigo: precio}.
-    """
+    """Conserva redondeo del motor; resuelve precio actual o último compatible."""
+    from core.catalogo import resolver, valido
     if not Path(carrito_path).exists():
         return {}
-
-    try:
-        df = pd.read_excel(carrito_path)
-        if df.shape[1] < 9:
-            return {}
-
-        codigo_col = df.columns[1]  # B
-        precio_col = df.columns[8]  # I
-
-        precios = {}
-        for _, row in df.iterrows():
-            codigo = str(row[codigo_col]).strip()
-            if codigo.lower() in {"nan", ""}:
-                continue
-
-            # normalizar códigos tipo 4000147.0 -> 4000147
-            try:
-                codigo_norm = str(int(float(codigo)))
-            except Exception:
-                codigo_norm = codigo
-
-            precio_raw = row[precio_col]
-
-            # Parser robusto para precios argentinos:
-            # - Si Excel ya lo leyó como número, se usa directo.
-            # - Si viene como texto "42.000,50", se interpreta como 42000.50.
-            # - Si viene como texto "42000.50", se interpreta como 42000.50.
-            if isinstance(precio_raw, (int, float)) and pd.notna(precio_raw):
-                precio = float(precio_raw)
-            else:
-                s = str(precio_raw).strip()
-                s = s.replace("$", "").replace(" ", "")
-
-                if "," in s:
-                    # Formato argentino: 42.000,50
-                    s = s.replace(".", "").replace(",", ".")
-                else:
-                    # Sin coma decimal: dejar punto como decimal si existe.
-                    # Si el punto era separador de miles, Excel normalmente ya lo hubiera leído como texto con coma decimal.
-                    pass
-
-                precio = pd.to_numeric(s, errors="coerce")
-
-            if pd.notna(precio):
-                precios[codigo_norm] = int(float(precio))
-
-        return precios
-
-    except Exception:
-        return {}
+    return {codigo: int(r['precio']) for codigo, r in resolver(carrito_path).items()
+            if valido(r.get('precio'))}
 
 
 def normalizar_codigo_compra(codigo):
@@ -180,6 +128,7 @@ def load_productos(maestro_path):
     col_tipo = find_column(productos, ["Tipo Producto", "Tipo"])
     col_activo = find_column(productos, ["Activo"])
     col_excluir = find_column(productos, ["Excluir"])
+    col_peso = find_column(productos, ["Peso Compra (kg)"])
 
     required = [col_producto, col_codigo, col_producto_compra, col_minima]
     if any(c is None for c in required):
@@ -191,6 +140,7 @@ def load_productos(maestro_path):
     out["Producto Compra"] = productos[col_producto_compra]
     out["Compra Mínima"] = pd.to_numeric(productos[col_minima], errors="coerce").fillna(1)
     out["Tipo Producto"] = productos[col_tipo] if col_tipo else ""
+    out["Peso Compra (kg)"] = pd.to_numeric(productos[col_peso], errors="coerce") if col_peso else np.nan
     out["Activo"] = productos[col_activo].apply(truthy) if col_activo else True
     out["Excluir"] = productos[col_excluir].apply(truthy) if col_excluir else False
     out = out[out["Producto Base"].notna() & (out["Producto Base"] != "")]
@@ -520,6 +470,9 @@ def procesar_costo_stock(stock_file, maestro_file, output_file, carrito_file=DEF
     aliases = load_aliases(maestro_file)
     exclusiones = load_exclusiones(maestro_file)
     precios_carrito = load_precios_carrito(carrito_file)
+    from core.catalogo import resolver, detalle_referencias, ajustar_compra, precios_compatibles
+    referencias_carrito = resolver(carrito_file)
+    precios_carrito = precios_compatibles(precios_carrito, referencias_carrito, productos)
 
     productos_validos = productos[(productos["Activo"]) & (~productos["Excluir"])].copy()
     productos_map = productos_validos.set_index("Producto Base").to_dict(orient="index")
@@ -548,6 +501,10 @@ def procesar_costo_stock(stock_file, maestro_file, output_file, carrito_file=DEF
 
     final["Compra Mínima"] = pd.to_numeric(final["Compra Mínima"], errors="coerce").fillna(1)
     final["Código Compra Normalizado"] = final["Código Compra"].apply(normalizar_codigo_compra)
+    final["Origen precio"] = final["Código Compra Normalizado"].map(lambda c: referencias_carrito.get(c, {}).get('fuentes', {}).get('precio', 'Sin dato'))
+    final["Fecha precio"] = final["Código Compra Normalizado"].map(lambda c: referencias_carrito.get(c, {}).get('fecha_precio') or 'Sin fecha informada')
+    final["Estado catálogo"] = final["Código Compra Normalizado"].map(lambda c: referencias_carrito.get(c, {}).get('estado', 'Sin referencia'))
+    final["Cubicaje de referencia"] = final["Código Compra Normalizado"].map(lambda c: referencias_carrito.get(c, {}).get('cubicaje'))
     final["Precio Pack"] = final["Código Compra Normalizado"].map(precios_carrito).where(lambda x: x > 0).astype("Int64")
 
     final["Costo Unitario Eq"] = final.apply(
@@ -567,7 +524,7 @@ def procesar_costo_stock(stock_file, maestro_file, output_file, carrito_file=DEF
         "Valor Stock Actual",
         "Código Compra",
         "Producto Compra",
-        "Productos agrupados",
+        "Productos agrupados", "Origen precio", "Fecha precio", "Estado catálogo", "Cubicaje de referencia",
     ]].copy().rename(columns={
         "Producto Base": "Producto"
     }).sort_values("Valor Stock Actual", ascending=False)
@@ -613,6 +570,7 @@ def procesar_costo_stock(stock_file, maestro_file, output_file, carrito_file=DEF
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         resumen.to_excel(writer, index=False, sheet_name="Resumen")
         sin_precio.to_excel(writer, index=False, sheet_name="Sin precio")
+        pd.DataFrame(detalle_referencias(carrito_file, final['Código Compra'])).to_excel(writer, index=False, sheet_name="Referencias catálogo")
         categoria.to_excel(writer, index=False, sheet_name="Valorización categoría")
         detalle.to_excel(writer, index=False, sheet_name="Valorización producto")
         stock_negativo.to_excel(writer, index=False, sheet_name="Stock negativo")
@@ -637,6 +595,9 @@ def procesar_archivos(stock_file, sabores_file, data_file, maestro_file, output_
     aliases = load_aliases(maestro_file)
     exclusiones = load_exclusiones(maestro_file)
     precios_carrito = load_precios_carrito(carrito_file)
+    from core.catalogo import resolver, detalle_referencias, ajustar_compra, precios_compatibles
+    referencias_carrito = resolver(carrito_file)
+    precios_carrito = precios_compatibles(precios_carrito, referencias_carrito, productos)
 
     productos_validos = productos[(productos["Activo"]) & (~productos["Excluir"])].copy()
     productos_map = productos_validos.set_index("Producto Base").to_dict(orient="index")
@@ -723,9 +684,16 @@ def procesar_archivos(stock_file, sabores_file, data_file, maestro_file, output_
     final["Compra Mínima"] = pd.to_numeric(final["Compra Mínima"], errors="coerce").fillna(1)
 
     final["Código Compra Normalizado"] = final["Código Compra"].apply(normalizar_codigo_compra)
+    final["Origen precio"] = final["Código Compra Normalizado"].map(lambda c: referencias_carrito.get(c, {}).get('fuentes', {}).get('precio', 'Sin dato'))
+    final["Fecha precio"] = final["Código Compra Normalizado"].map(lambda c: referencias_carrito.get(c, {}).get('fecha_precio') or 'Sin fecha informada')
+    final["Estado catálogo"] = final["Código Compra Normalizado"].map(lambda c: referencias_carrito.get(c, {}).get('estado', 'Sin referencia'))
+    final["Cubicaje de referencia"] = final["Código Compra Normalizado"].map(lambda c: referencias_carrito.get(c, {}).get('cubicaje'))
     final["Precio Pack"] = final["Código Compra Normalizado"].map(precios_carrito).where(lambda x: x > 0)
 
     final["Packs a Comprar"] = final.apply(lambda r: ceil_to_int(r["Reposición necesaria"] / r["Compra Mínima"]) if r["Reposición necesaria"] > 0 else 0, axis=1)
+    ajustes = final.apply(lambda r: ajustar_compra(r['Packs a Comprar'], referencias_carrito.get(r['Código Compra Normalizado'])), axis=1)
+    final['Packs a Comprar'] = ajustes.map(lambda a: a[0])
+    final['Observación'] = final['Observación'].str.cat(ajustes.map(lambda a: a[1]), sep=' · ').str.strip(' ·')
     final["Unidades Finales"] = final["Packs a Comprar"] * final["Compra Mínima"]
 
     final["Costo Unitario Eq"] = final.apply(
@@ -749,7 +717,8 @@ def procesar_archivos(stock_file, sabores_file, data_file, maestro_file, output_
         "Grupo", "Producto Base", "Stock", "Ventas período", "Venta Semanal", "Semanas Stock",
         "Reposición necesaria", "Compra Mínima", "Packs a Comprar", "Unidades Finales",
         "Precio Pack", "Valor Stock Actual", "Valor Pedido Sugerido",
-        "Código Compra", "Producto Compra", "Observación", "Productos agrupados"
+        "Código Compra", "Producto Compra", "Observación", "Productos agrupados",
+        "Origen precio", "Fecha precio", "Estado catálogo", "Cubicaje de referencia"
     ]].copy()
 
     pedido = pedido.rename(columns={
@@ -882,6 +851,7 @@ def procesar_archivos(stock_file, sabores_file, data_file, maestro_file, output_
         posibles_faltantes.to_excel(writer, index=False, sheet_name="Posibles faltantes")
         sin_clasificar.to_excel(writer, index=False, sheet_name="Sin clasificar")
         sin_precio.to_excel(writer, index=False, sheet_name="Sin precio")
+        pd.DataFrame(detalle_referencias(carrito_file, final['Código Compra'])).to_excel(writer, index=False, sheet_name="Referencias catálogo")
         explicacion.to_excel(writer, index=False, sheet_name="Explicación")
 
     format_workbook(output_file)

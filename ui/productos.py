@@ -15,8 +15,12 @@ def render_completar_productos(github, stock_path, maestro_path, carrito_path, a
         st.warning(f'No pude revisar los datos pendientes del Maestro: {exc}')
         return
     with st.expander(f'Completar productos del stock · {len(pendientes)} pendientes', expanded=False):
+        revisar_historicos = st.checkbox('También quiero revisar asociaciones con costo histórico', key='revisar_asociaciones_historicas_290')
+        if revisar_historicos:
+            pendientes = pendientes_stock(stock_path, maestro_path, carrito_path, incluir_historicos=True)
+            st.caption('Estas asociaciones se conservan y no requieren cambios por estar ausentes del Carrito. Revisalas solo si identificaste un código de reemplazo real.')
         if not pendientes:
-            st.success('Los productos detectados tienen ficha, código de compra y precio vigente.')
+            st.success('Los productos detectados tienen ficha, código de compra y costo conocido, actual o histórico.')
             return
         st.caption('Vinculá cada producto con su artículo del Carrito. El precio se seguirá leyendo del Carrito; el costo del stock se calcula con la equivalencia que confirmes.')
         st.dataframe(pd.DataFrame([{'Producto': p['producto'], 'Código actual': p['codigo'],

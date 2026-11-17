@@ -37,7 +37,7 @@ def catalogo_carrito(path):
     return registros
 
 
-def pendientes_stock(stock_path, maestro_path, carrito_path):
+def pendientes_stock(stock_path, maestro_path, carrito_path, incluir_historicos=False):
     productos = motor.load_productos(maestro_path)
     # El motor tolera celdas vacías con valor 1. El editor debe mostrarlas como
     # pendientes en lugar de confundir ese valor de respaldo con un dato confirmado.
@@ -51,7 +51,9 @@ def pendientes_stock(stock_path, maestro_path, carrito_path):
                  for _, r in aliases.iterrows()}
     filas = motor.read_stock(stock_path, motor.load_config(maestro_path), alias_map,
                              mapa, motor.load_exclusiones(maestro_path))
-    precios = motor.load_precios_carrito(carrito_path)
+    from core.catalogo import resolver, precios_compatibles
+    referencias = resolver(carrito_path)
+    precios = precios_compatibles(motor.load_precios_carrito(carrito_path), referencias, productos)
     salida = []
     if filas.empty:
         return salida
@@ -64,10 +66,12 @@ def pendientes_stock(stock_path, maestro_path, carrito_path):
         if not codigo:
             motivos.append('Sin código de compra')
         elif not positivo(precios.get(codigo)):
-            motivos.append('Código sin precio vigente en el Carrito')
+            motivos.append('Sin precio actual ni respaldo histórico; revisar Carrito, no implica asociación incorrecta')
         minima = equivalencias.get(base)
         if not positivo(minima):
             motivos.append('Sin equivalencia de compra')
+        if incluir_historicos and not motivos and referencias.get(codigo, {}).get('fuentes', {}).get('precio') == 'Histórico':
+            motivos.append('Asociación conservada con costo histórico. Revisar solo si cambió el código de compra')
         if motivos:
             salida.append({'producto': base, 'codigo': codigo, 'motivo': ' · '.join(motivos),
                            'nombres': sorted(set(grupo['Nombre original'])),

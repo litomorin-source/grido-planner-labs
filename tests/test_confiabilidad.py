@@ -123,9 +123,13 @@ class ArchivosRealesTests(unittest.TestCase):
     def test_reproduce_pedido_referencia(self):
         p = self.r['pedido']
         ref = pd.read_excel(self.datos/'Pedido_Final (42).xlsx', sheet_name='Pedido Final')
-        self.assertEqual(int(p['Packs a Comprar'].sum()), 185)
-        self.assertEqual(self.r['valor_pedido_total'], 5007851)
+        self.assertEqual(int(p['Packs a Comprar'].sum()), 176)
+        self.assertEqual(self.r['valor_pedido_total'], 4885064)
         compra = p[p['Packs a Comprar'].gt(0)].set_index('Producto')
+        # El Carrito de referencia indica Disponible=0 para Frutal Frutilla.
+        # La 2.9.0 conserva la necesidad pero retira sus 9 packs de la compra.
+        self.assertEqual(int(ref.set_index('Producto').loc['palito frutal frutilla','Packs a Comprar']),9)
+        ref.loc[ref['Producto'].eq('palito frutal frutilla'),'Packs a Comprar'] = 0
         compra_ref = ref[ref['Packs a Comprar'].gt(0)].set_index('Producto')
         pd.testing.assert_series_equal(compra['Packs a Comprar'].sort_index(), compra_ref['Packs a Comprar'].sort_index(), check_dtype=False)
         comunes = p.merge(ref,on='Producto',suffixes=('_nuevo','_ref'))
@@ -149,7 +153,7 @@ class ArchivosRealesTests(unittest.TestCase):
         with patch.object(motor, 'load_precios_carrito', return_value=precios):
             r = motor.procesar_archivos(**args)
         self.assertTrue(r['pedido_valorizacion_incompleta'])
-        self.assertAlmostEqual(r['valor_pedido_total'],5007851-float(fila['Valor Pedido Sugerido']))
+        self.assertAlmostEqual(r['valor_pedido_total'],4885064-float(fila['Valor Pedido Sugerido']))
         p = r['pedido'].set_index('Producto')
         self.assertTrue(pd.isna(p.loc[fila['Producto'],'Valor Pedido Sugerido']))
 
@@ -179,7 +183,7 @@ class ArchivosRealesTests(unittest.TestCase):
             path = self.args[clave]
             self.assertEqual(identificar_archivo_operativo(path.name,path.read_bytes())[0],tipo)
         data, productos, packs = generar_carrito_importacion(self.r['pedido'],self.args['carrito_file'])
-        self.assertEqual(packs,185)
+        self.assertEqual(packs,176)
         w = load_workbook(BytesIO(data),data_only=True)
         headers = {c.value:c.column for c in w.active[1]}
         for row in list(w.active.values)[1:]:
@@ -189,8 +193,8 @@ class ArchivosRealesTests(unittest.TestCase):
         maestro = maestro_para_pedido(self.args['maestro_file'],self.output,omisiones)
         r = motor.procesar_archivos(**dict(self.args,maestro_file=maestro,output_file=self.output/'omitidos.xlsx'))
         self.assertEqual(len(r['pedido']),95)
-        self.assertEqual(r['valor_pedido_total'],5007851)
-        self.assertEqual(int(r['pedido']['Packs a Comprar'].sum()),185)
+        self.assertEqual(r['valor_pedido_total'],4885064)
+        self.assertEqual(int(r['pedido']['Packs a Comprar'].sum()),176)
 
     def test_omisiones_guardadas_excluidas_de_costos_y_alertas(self):
         omisiones = pd.read_csv(ROOT/'data/Omisiones_Futuros_Pedidos.csv').to_dict('records')

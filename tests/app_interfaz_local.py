@@ -29,6 +29,9 @@ class GitHubLocal:
         st.session_state.setdefault('_archivos_prueba', {})[kwargs['path']] = kwargs['content_bytes']
         return {'ok': True, 'commit': 'solo-memoria-local'}
 
+    def list_commits_for_path(self, path, per_page=10):
+        return {'ok': True, 'commits': []}
+
 home.GitHubSync = GitHubLocal
 home.get_github_config = lambda: dict(ok=True, token='local', repo='local', branch='local')
 st.set_page_config(layout='wide')
