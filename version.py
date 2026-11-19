@@ -1,1 +1,1 @@
-from core.version import APP_VERSION
+APP_VERSION = "Labs 3.0.1"

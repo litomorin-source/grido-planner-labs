@@ -1,4 +1,4 @@
-# GridoPlanner Labs 3.0.0
+# GridoPlanner Labs 3.0.1
 
 Planificación semanal, costos de reposición y stock/cámara.
 
@@ -55,3 +55,9 @@ No escriben en GitHub. El adaptador tests/app_interfaz_local.py permite comproba
 
 Una fuente por dato y una regla compartida. Historial conservado. Las tareas excepcionales se resuelven
 internamente; no se agregan botones permanentes para migraciones de una sola vez.
+
+## Corrección 3.0.1
+
+La cantidad sugerida depende del stock, ventas, semanas configuradas y equivalencias del Maestro. Las restricciones del Carrito (disponibilidad, máximos, mínimos y múltiplos) solo generan advertencias. Un código ausente, precio pendiente o presentación para revisar no reduce la cantidad a cero. Los cambios de nombre por sí solos no bloquean ni descartan un costo histórico. Los cambios físicos de peso/cubicaje siguen marcados para revisar; no se modifican equivalencias automáticamente.
+
+El archivo de importación al proveedor requiere que sus códigos existan en la plantilla: si faltan, se informa el problema sin quitar productos del informe de pedido.
