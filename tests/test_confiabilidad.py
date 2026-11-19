@@ -121,10 +121,10 @@ class ArchivosRealesTests(unittest.TestCase):
         cls.tmp.cleanup()
 
     def test_reproduce_pedido_referencia(self):
-        # Referencia 3.0: mismo stock/mix 16-11; corrige unidades x8 y cajas x12.
+        # Referencia 3.0.1: equivalencias x8/x12 y 9 packs de frutilla antes bloqueados.
         p = self.r['pedido'].set_index('Producto')
-        self.assertEqual(int(p['Packs a Comprar'].sum()), 162)
-        self.assertEqual(self.r['valor_pedido_total'], 4594758)
+        self.assertEqual(int(p['Packs a Comprar'].sum()), 171)
+        self.assertEqual(self.r['valor_pedido_total'], 4717545)
         self.assertAlmostEqual(p.loc['bombon crocante', 'Ventas 14 días'], 44.5)
         self.assertEqual(p.loc['bombon crocante','Packs a Comprar'],7)
         self.assertEqual(p.loc['hel dul equi choco 80 gr','Stock'],206)
@@ -179,7 +179,7 @@ class ArchivosRealesTests(unittest.TestCase):
             path = self.args[clave]
             self.assertEqual(identificar_archivo_operativo(path.name,path.read_bytes())[0],tipo)
         data, productos, packs = generar_carrito_importacion(self.r['pedido'],self.args['carrito_file'])
-        self.assertEqual(packs,162)
+        self.assertEqual(packs,171)
         w = load_workbook(BytesIO(data),data_only=True)
         headers = {c.value:c.column for c in w.active[1]}
         for row in list(w.active.values)[1:]:
@@ -189,8 +189,8 @@ class ArchivosRealesTests(unittest.TestCase):
         maestro = maestro_para_pedido(self.args['maestro_file'],self.output,omisiones)
         r = motor.procesar_archivos(**dict(self.args,maestro_file=maestro,output_file=self.output/'omitidos.xlsx'))
         self.assertFalse(set(r['pedido']['Producto']) & {motor.normalize(f['producto_base']) for f in omisiones})
-        self.assertEqual(r['valor_pedido_total'],4594758)
-        self.assertEqual(int(r['pedido']['Packs a Comprar'].sum()),162)
+        self.assertEqual(r['valor_pedido_total'],4717545)
+        self.assertEqual(int(r['pedido']['Packs a Comprar'].sum()),171)
 
     def test_omisiones_guardadas_excluidas_de_costos_y_alertas(self):
         omisiones = pd.read_csv(ROOT/'data/Omisiones_Futuros_Pedidos.csv').to_dict('records')

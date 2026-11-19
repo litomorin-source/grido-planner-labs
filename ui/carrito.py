@@ -81,7 +81,7 @@ def render_actualizar_carrito(github):
                 st.warning(f'Desaparece más del 20% del catálogo ({ausentes} artículos). Verificá que no sea un archivo incompleto o anterior.')
             estructurales = sorted({r['codigo'] for r in cambios if r['cambio']=='Presentación para revisar'} | (set(bloqueos)&set(nuevos)))
             if estructurales:
-                st.warning('Los cambios de descripción, peso o cubicaje conservan la referencia anterior y bloquean la compra de esos códigos hasta revisar la presentación.')
+                st.warning('Los cambios de peso o cubicaje conservan la referencia anterior para revisar la presentación. La cantidad sugerida no se modifica; se calcula con el Maestro.')
                 confirmados = st.multiselect('Confirmo que estos códigos siguen representando la misma presentación física', estructurales,
                                              format_func=lambda c: f"{c} · {nuevos[c]['descripcion']}", key='mismos_packs_'+huella)
                 st.caption('Marcá solo correcciones de nombre/datos de la misma presentación, también válida para tus existencias. Si cambió realmente el contenido del pack, dejalo pendiente para reconciliar el Maestro y el stock.')

@@ -38,7 +38,7 @@ class CatalogoTests(unittest.TestCase):
         self.assertEqual(r['2']['cubicaje'],.513)
         self.assertEqual(r['2']['fuentes']['precio'],'Histórico')
         self.assertFalse(r['2']['comprable'])
-        self.assertEqual(ajustar_compra(3,r['2'])[0],0)
+        self.assertEqual(ajustar_compra(3,r['2'])[0],3)
         reaparece = preparar(actualizado,self.antes,'vuelve','2026-11-17')
         self.assertTrue(resolver(reaparece)['2']['comprable'])
         self.assertEqual(resolver(reaparece)['2']['fuentes']['precio'],'Actual')
@@ -98,13 +98,27 @@ class CatalogoTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'historial'):
             leer(b.getvalue())
 
-    def test_limites_de_compra_sin_packs_fraccionarios(self):
-        r = dict(comprable=True,minimo=4,multiplo=3,disponible=10,maximo=8)
-        self.assertEqual(ajustar_compra(2,r)[0],6)
-        self.assertEqual(ajustar_compra(20,r)[0],6)
-        self.assertEqual(ajustar_compra(2,dict(r,disponible=0))[0],0)
-        self.assertEqual(ajustar_compra(2,dict(r,multiplo=.5))[0],0)
-        self.assertEqual(ajustar_compra(2,dict(r,disponible=-1))[0],0)
+    def test_carrito_no_cambia_necesidad_de_compra(self):
+        for referencia in [None, {}, dict(presente=False), dict(revisar=True),
+                           dict(precio=0), dict(minimo=10), dict(maximo=0),
+                           dict(disponible=0), dict(multiplo=3), dict(multiplo=.5),
+                           dict(disponible=-1), dict(minimo=4,multiplo=3,maximo=8)]:
+            for cantidad in [0, 2, 14, 20]:
+                with self.subTest(referencia=referencia,cantidad=cantidad):
+                    resultado, aviso = ajustar_compra(cantidad, referencia)
+                    self.assertEqual(resultado, cantidad)
+                    if cantidad:
+                        self.assertTrue(aviso)
+
+    def test_renombrar_no_bloquea_ni_descarta_costo_historico(self):
+        import pandas as pd
+        nuevo = carrito([('1',120,'OTRO NOMBRE',2,.5)])
+        r = resolver(preparar(self.antes,nuevo,'renombrado'))['1']
+        self.assertFalse(r['revisar'])
+        self.assertEqual(r['precio'],120)
+        r['fuentes']['precio']='Histórico'
+        maestro=pd.DataFrame([{'Código Compra':'1','Producto Compra':'NOMBRE ANTERIOR','Peso Compra (kg)':2}])
+        self.assertEqual(precios_compatibles({'1':120},{'1':r},maestro),{'1':120})
 
     def test_conflicto_no_guarda_y_exito_usa_sha(self):
         github=Mock()

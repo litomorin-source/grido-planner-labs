@@ -125,8 +125,6 @@ def _con_vigente(actuales, historial):
 
 
 def compatible(a, b):
-    if normalizar(a['descripcion']) != normalizar(b['descripcion']):
-        return False
     for c in ['peso', 'cubicaje']:
         if valido(a.get(c)) and valido(b.get(c)) and not math.isclose(a[c], b[c], rel_tol=1e-6):
             return False
@@ -135,6 +133,8 @@ def compatible(a, b):
 
 def resolver(origen):
     actuales, historial, bloqueos = leer(origen)
+    # Los bloqueos anteriores debidos solo al nombre ya no requieren revisión.
+    bloqueos = {c: r for c, r in bloqueos.items() if c not in actuales or not compatible(r, actuales[c])}
     evento_actual = _evento(actuales)
     todos = set(actuales) | {r['codigo'] for r in historial}
     salida = {}
@@ -278,28 +278,35 @@ def detalle_referencias(origen, codigos=None):
 
 
 def ajustar_compra(cantidad, referencia):
-    """Enteros por modalidad actual; nunca compra un código solamente histórico."""
+    """Conserva la necesidad calculada; el Carrito solo aporta advertencias."""
     if cantidad <= 0:
-        return 0, ''
-    if not referencia or not referencia.get('comprable'):
-        return 0, 'Compra pendiente: código ausente, sin precio actual o presentación para revisar'
-    if any(referencia.get(c) is not None and referencia[c] < 0 for c in ['minimo','maximo','disponible']):
-        return 0, 'Compra pendiente: restricciones negativas en Carrito'
-    minimo = referencia.get('minimo')
+        return cantidad, ''
+    if not referencia:
+        return cantidad, 'Sin referencia en Carrito; revisar código y costo'
+    avisos = []
+    if not referencia.get('presente', True):
+        avisos.append('Ausente del Carrito; revisar disponibilidad')
+    if referencia.get('revisar'):
+        avisos.append('Presentación para revisar; cálculo según Maestro')
+    if referencia.get('fuentes', {}).get('precio') == 'Histórico':
+        avisos.append('Precio histórico de referencia')
+    elif not valido(referencia.get('precio')):
+        avisos.append('Precio pendiente')
+    for campo, etiqueta in [('minimo', 'mínimo'), ('maximo', 'máximo'), ('disponible', 'disponibilidad')]:
+        valor = referencia.get(campo)
+        if valor is None:
+            continue
+        if valor < 0:
+            avisos.append(f'{etiqueta.capitalize()} inválida en Carrito')
+        elif (campo == 'minimo' and cantidad < valor) or (campo != 'minimo' and cantidad > valor):
+            avisos.append(f'Carrito informa {etiqueta} {valor:g}; revisar manualmente')
     multiplo = referencia.get('multiplo')
-    if multiplo is None:
-        multiplo = 1
-    if multiplo <= 0 or multiplo != int(multiplo):
-        return 0, 'Compra pendiente: múltiplo inválido en Carrito'
-    propuesta = math.ceil(max(cantidad, minimo or 0)/multiplo)*int(multiplo)
-    limites = [n for n in [referencia.get('maximo'), referencia.get('disponible')] if n is not None and n >= 0]
-    if limites:
-        limite = math.floor(min(limites)/multiplo)*int(multiplo)
-        propuesta = min(propuesta, limite)
-        if propuesta < (minimo or 0):
-            propuesta = 0
-    aviso = '' if propuesta == cantidad else 'Cantidad ajustada por disponibilidad, máximo, mínimo o múltiplo del Carrito'
-    return int(propuesta), aviso
+    if multiplo is not None:
+        if multiplo <= 0 or multiplo != int(multiplo):
+            avisos.append('Múltiplo inválido en Carrito')
+        elif cantidad % multiplo:
+            avisos.append(f'Carrito informa múltiplo {multiplo:g}; revisar manualmente')
+    return cantidad, ' · '.join(avisos)
 
 
 def precios_compatibles(precios, referencias, productos):
@@ -310,10 +317,8 @@ def precios_compatibles(precios, referencias, productos):
         r = referencias.get(cod, {})
         if r.get('fuentes', {}).get('precio') != 'Histórico':
             continue
-        descripcion = normalizar(p.get('Producto Compra'))
         peso = numero(p.get('Peso Compra (kg)'))
-        incompatible = descripcion and descripcion != normalizar(r.get('descripcion'))
-        incompatible = incompatible or (valido(peso) and valido(r.get('peso')) and not math.isclose(peso,r['peso'],rel_tol=1e-6))
+        incompatible = (valido(peso) and valido(r.get('peso')) and not math.isclose(peso,r['peso'],rel_tol=1e-6))
         if incompatible:
             salida.pop(cod, None)
     return salida
