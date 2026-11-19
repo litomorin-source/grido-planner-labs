@@ -126,14 +126,14 @@ class CatalogoTests(unittest.TestCase):
         m.loc[0,'Producto Compra']='DELICIA X4';m.loc[0,'Peso Compra (kg)']=2.4
         self.assertEqual(precios_compatibles(precio,refs,m),precio)
 
-    @unittest.skipUnless(os.environ.get('GRIDO_CARRITO_NUEVO'), 'Requiere archivos actualizados privados')
+    @unittest.skipUnless(os.environ.get('GRIDO_CARRITO_ANTERIOR') and os.environ.get('GRIDO_CARRITO_NUEVO'), 'Requiere archivos actualizados privados')
     def test_delicia_real_y_asociacion_limon_conservada(self):
         import motor
         from core.alta_productos import pendientes_stock
         nuevo = Path(os.environ['GRIDO_CARRITO_NUEVO'])
         maestro = Path(os.environ['GRIDO_MAESTRO_NUEVO'])
         stock = Path(os.environ['GRIDO_DATOS_PRUEBA'])/'Stock_20261116_124624.csv'
-        recuperado = preparar(nuevo,ROOT/'respaldo/Carrito_Referencia_Recuperado.xlsx','ZIP original',historico=True)
+        recuperado = preparar(nuevo,Path(os.environ['GRIDO_CARRITO_ANTERIOR']),'ZIP original',historico=True)
         d = resolver(recuperado)['4000593']
         self.assertEqual((d['precio'],d['cubicaje'],d['peso']),(13145.26,.513,2.4))
         self.assertFalse(d['comprable'])

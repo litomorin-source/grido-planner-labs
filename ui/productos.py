@@ -16,8 +16,9 @@ def render_completar_productos(github, stock_path, maestro_path, carrito_path, a
         return
     with st.expander(f'Completar productos del stock · {len(pendientes)} pendientes', expanded=False):
         revisar_historicos = st.checkbox('También quiero revisar asociaciones con costo histórico', key='revisar_asociaciones_historicas_290')
-        if revisar_historicos:
-            pendientes = pendientes_stock(stock_path, maestro_path, carrito_path, incluir_historicos=True)
+        revisar_todos = st.checkbox('Revisar equivalencias de un producto existente', key='revisar_equivalencias_300')
+        if revisar_historicos or revisar_todos:
+            pendientes = pendientes_stock(stock_path, maestro_path, carrito_path, incluir_historicos=revisar_historicos, revisar_todos=revisar_todos)
             st.caption('Estas asociaciones se conservan y no requieren cambios por estar ausentes del Carrito. Revisalas solo si identificaste un código de reemplazo real.')
         if not pendientes:
             st.success('Los productos detectados tienen ficha, código de compra y costo conocido, actual o histórico.')
@@ -62,6 +63,13 @@ def render_completar_productos(github, stock_path, maestro_path, carrito_path, a
         minima = st.number_input('Presentaciones base por bulto de compra', min_value=0,
                                  value=minima_actual, step=1, key=campos+'_minima',
                                  help='Ejemplo: 10 cajas x10 en un pack de compra = 10 presentaciones base. Para un sabor vendido por caja: 1. Revisá el valor al cambiar de código.')
+        unidades_actuales = pendiente.get('unidades_base')
+        unidades_base = st.number_input('Unidades por presentación base', min_value=0,
+            value=int(unidades_actuales) if positivo(unidades_actuales) else 0, step=1,
+            key=campos+'_unidades_base',
+            help='Crocante: base = caja de 8; alfajor: caja de 6; palitos: caja de 10. Si la base es un pote, tacho o envase individual: 1. Revisá la descripción del Carrito y confirmá el contenido.')
+        if minima and unidades_base:
+            st.caption(f'1 bulto = {minima} presentaciones base × {unidades_base} unidades = {minima * unidades_base} unidades.')
         peso = st.number_input('Peso neto del bulto de compra (kg)', min_value=0.0,
                                value=float(articulo['peso']) if positivo(articulo['peso']) else 0.0,
                                step=0.01, format='%.3f', key=campos+'_peso',
@@ -70,20 +78,19 @@ def render_completar_productos(github, stock_path, maestro_path, carrito_path, a
         conocidos = set(aliases['Alias Normalizado'])
         presentaciones = {}
         for i, nombre in enumerate(pendiente['nombres']):
-            if motor.normalize(nombre) in conocidos:
-                continue
-            st.markdown(f'**Nombre nuevo en Stock:** {nombre}')
+            existente = aliases[aliases['Alias Normalizado'].eq(motor.normalize(nombre))]
+            tipo_alias = motor.normalize(existente.iloc[0]['Tipo Presentación']) if not existente.empty else ''
+            opciones = ['Presentación base', 'Unidad', 'Caja/pack']
+            inicial = 1 if 'unidad' in tipo_alias else 2 if ('caja' in tipo_alias or 'pack' in tipo_alias) else 0 if tipo_alias else None
+            st.markdown(f'**Nombre en Stock:** {nombre}')
             pres = st.selectbox('Cómo está expresada la cantidad del stock',
-                                ['Presentación base', 'Unidad', 'Caja/pack x20'], index=None,
+                                opciones, index=inicial,
                                 key=campos+f'_pres_{i}', placeholder='Confirmá la presentación',
-                                help='En palitos, la base del motor es x10; una caja x20 equivale a dos bases. En sabores, una caja es una presentación base.')
+                                help='Elegí Unidad para unidades sueltas, Caja/pack para una caja con contenido explícito, o Presentación base si la cantidad ya está expresada en la base confirmada arriba.')
             pack = None
-            if pres == 'Unidad':
-                pack = st.number_input('Unidades por presentación base', min_value=1,
-                                       value=10 if 'palito' in motor.normalize(nombre) else 1,
-                                       step=1, key=campos+f'_pack_{i}')
-            if pres == 'Caja/pack x20':
-                pack = 20
+            if pres == 'Caja/pack':
+                pack = st.number_input('Unidades contenidas en esta caja', min_value=1,
+                                       value=int(existente.iloc[0]['Pack Detectado']) if not existente.empty and positivo(existente.iloc[0]['Pack Detectado']) else 1, step=1, key=campos+f'_pack_{i}')
             if pres:
                 presentaciones[nombre] = (pres, pack)
         # Construir siempre la vista previa desde los campos visibles; evita guardar
@@ -91,14 +98,15 @@ def render_completar_productos(github, stock_path, maestro_path, carrito_path, a
         try:
             candidato, vista = preparar_producto(maestro_bytes, carrito_path, elegido,
                                                 articulo['codigo'], minima, tipo, peso,
-                                                pendiente['nombres'], presentaciones, pendiente['grupo'])
+                                                pendiente['nombres'], presentaciones, pendiente['grupo'], unidades_base=unidades_base)
         except ValueError as exc:
             st.info(str(exc))
             return
         st.markdown('#### Revisar antes de guardar')
         etiquetas_campos = {'codigo compra': 'Código de compra', 'producto compra': 'Descripción de compra',
                            'compra minima': 'Presentaciones por bulto', 'tipo producto': 'Tipo de producto',
-                           'peso compra kg': 'Peso del bulto (kg)'}
+                           'peso compra kg': 'Peso del bulto (kg)',
+                           'unidades por presentacion base': 'Unidades por presentación base'}
         cambios = pd.DataFrame([{'Dato': label,
                                  'Actual': str(vista['antes'].get(campo) or '—'),
                                  'Propuesto': str(vista['despues'][campo])}

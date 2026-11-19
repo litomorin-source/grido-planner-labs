@@ -30,20 +30,13 @@ def render_actualizar_carrito(github):
     accion = st.radio('Qué querés hacer', ['Actualizar Carrito vigente', 'Recuperar datos de un Carrito anterior'],
                       key='accion_carrito_290')
     historico = accion == 'Recuperar datos de un Carrito anterior'
-    referencia = Path(__file__).resolve().parents[1] / 'respaldo/Carrito_Referencia_Recuperado.xlsx'
-    usar_referencia = historico and referencia.exists() and st.checkbox(
-        'Usar el Carrito de referencia recuperado del ZIP original (incluye Delicia)', key='usar_respaldo_290')
-    if usar_referencia:
-        entrante = referencia.read_bytes()
-        nombre = 'Carrito de referencia del ZIP original; fecha comercial no informada'
-    else:
-        archivo = st.file_uploader('Seleccionar Carrito anterior' if historico else 'Seleccionar Carrito nuevo',
-                                   type=['xlsx'], key='cargar_carrito_hist_290' if historico else 'cargar_carrito_nuevo_290')
-        if not archivo:
-            if bloqueos:
-                st.warning(f'{len(bloqueos)} códigos tienen cambios de presentación para revisar. Podés volver a cargar el Carrito actual para revisarlos.')
-            return
-        entrante, nombre = archivo.getvalue(), archivo.name
+    archivo = st.file_uploader('Seleccionar Carrito anterior' if historico else 'Seleccionar Carrito nuevo',
+                               type=['xlsx'], key='cargar_carrito_hist_290' if historico else 'cargar_carrito_nuevo_290')
+    if not archivo:
+        if bloqueos:
+            st.warning(f'{len(bloqueos)} códigos tienen cambios de presentación para revisar.')
+        return
+    entrante, nombre = archivo.getvalue(), archivo.name
     fecha = st.date_input('Fecha del Carrito (si la conocés)', value=None,
                           max_value=datetime.now(ZoneInfo('America/Argentina/Buenos_Aires')).date(),
                           key='fecha_carrito_hist_290' if historico else 'fecha_carrito_nuevo_290')

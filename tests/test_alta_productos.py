@@ -60,16 +60,16 @@ class EditorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             carrito = Path(t)/'carrito.xlsx'
             wb.save(carrito)
-            data, vista = preparar_producto(self.original, carrito, 'crema al cielo', '4999999',
-                                           1, 'Sabor 7,800 kg', 7.8, ['Crema Al Cielo 7,800 Kg  - Grido'],
-                                           {'Crema Al Cielo 7,800 Kg  - Grido': ('Presentación base', None)}, 'Común')
+            data, vista = preparar_producto(self.original, carrito, 'sabor nuevo de prueba', '4999999',
+                                           1, 'Sabor 7,800 kg', 7.8, ['Sabor Nuevo de Prueba'],
+                                           {'Sabor Nuevo de Prueba': ('Presentación base', None)}, 'Común', unidades_base=1)
         self.assertTrue(vista['nuevo'])
         p = motor.load_productos(BytesIO(data))
         self.assertEqual(len(p), len(motor.load_productos(self.maestro))+1)
         aliases = motor.load_aliases(BytesIO(data))
-        self.assertIn('crema al cielo', set(aliases['Producto Base']))
+        self.assertIn('sabor nuevo de prueba', set(aliases['Producto Base']))
         w = load_workbook(BytesIO(data))
-        self.assertEqual(list(w['Productos'].values)[-1][-1], 7.8)
+        self.assertEqual(motor.load_productos(BytesIO(data)).iloc[-1]['Peso Compra (kg)'], 7.8)
 
     def test_impide_datos_invalidos_y_codigo_duplicado(self):
         for args in [dict(minima=0), dict(minima=1.5), dict(peso=0), dict(codigo='0000000'),
@@ -105,9 +105,7 @@ class EditorTests(unittest.TestCase):
     def test_pendientes_reales_y_recalculo_con_correccion(self):
         stock = Path(os.environ['GRIDO_DATOS_PRUEBA'])/'Stock_20261116_124624.csv'
         pendientes = pendientes_stock(stock,self.maestro,self.carrito)
-        self.assertEqual({p['producto'] for p in pendientes}, {'crema al cielo','palito frutal limon'})
-        crema = next(p for p in pendientes if p['producto']=='crema al cielo')
-        self.assertEqual(crema['codigo'], '')
+        self.assertEqual(pendientes, [])
         candidatos = ordenar_candidatos('palito frutal limon',catalogo_carrito(self.carrito))
         self.assertEqual(candidatos[0]['codigo'],'4000857')
         data, _ = self.limon()
@@ -115,7 +113,7 @@ class EditorTests(unittest.TestCase):
             nuevo = Path(t)/'maestro.xlsx'
             nuevo.write_bytes(data)
             p = pendientes_stock(stock,nuevo,self.carrito)
-            self.assertEqual({x['producto'] for x in p}, {'crema al cielo'})
+            self.assertEqual(p, [])
             r = motor.procesar_costo_stock(stock,nuevo,Path(t)/'stock.xlsx',self.carrito)
             limon = r['detalle'].set_index('Producto').loc['palito frutal limon']
             self.assertEqual(limon['Precio Pack'],13643)

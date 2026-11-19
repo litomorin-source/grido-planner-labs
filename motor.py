@@ -12,7 +12,8 @@ from openpyxl.utils import get_column_letter
 
 
 # Archivo opcional con precios: columna B = código pack, columna I = precio.
-DEFAULT_CARRITO_FILE = Path(__file__).resolve().parent / "datos" / "Modelo_de_Carrito.xlsx"
+from core.rutas import CARRITO
+DEFAULT_CARRITO_FILE = Path(__file__).resolve().parent / CARRITO
 
 
 def load_precios_carrito(carrito_path=DEFAULT_CARRITO_FILE):
@@ -141,6 +142,8 @@ def load_productos(maestro_path):
     out["Compra Mínima"] = pd.to_numeric(productos[col_minima], errors="coerce").fillna(1)
     out["Tipo Producto"] = productos[col_tipo] if col_tipo else ""
     out["Peso Compra (kg)"] = pd.to_numeric(productos[col_peso], errors="coerce") if col_peso else np.nan
+    col_unidades = find_column(productos, ["Unidades por presentación base"])
+    out["Unidades por presentación base"] = pd.to_numeric(productos[col_unidades], errors="coerce") if col_unidades else np.nan
     out["Activo"] = productos[col_activo].apply(truthy) if col_activo else True
     out["Excluir"] = productos[col_excluir].apply(truthy) if col_excluir else False
     out = out[out["Producto Base"].notna() & (out["Producto Base"] != "")]
@@ -183,7 +186,16 @@ def load_exclusiones(maestro_path):
     col = find_column(excl, ["Producto", "Producto/Opción", "Producto Opcion", "Alias", "Nombre"])
     if col is None:
         col = excl.columns[0]
-    return set(excl[col].dropna().astype(str).apply(normalize))
+    excluidos = set(excl[col].dropna().astype(str).apply(normalize))
+    productos = load_productos(maestro_path)
+    excluidos.update(productos.loc[~productos['Activo'] | productos['Excluir'], 'Producto Base'])
+    aliases = load_aliases(maestro_path)
+    # Una exclusión se propaga a todos los nombres del mismo producto.
+    for _, fila in aliases.iterrows():
+        if fila['Alias Normalizado'] in excluidos:
+            excluidos.add(fila['Producto Base'])
+    excluidos.update(aliases.loc[aliases['Producto Base'].isin(excluidos), 'Alias Normalizado'])
+    return excluidos
 
 
 def detect_pack(raw_name):
@@ -223,31 +235,34 @@ def alias_lookup(raw_name, alias_map):
 
 
 def infer_conversion(raw_name, product_base, tipo_presentacion, pack_detectado, productos_map):
-    raw_norm = normalize(raw_name)
+    """Única conversión a base: unidades de la presentación / unidades de la base.
+
+    Compra Mínima expresa bases por bulto, nunca unidades por caja.
+    El tipo del alias es explícito; no se deducen gramos o litros del nombre.
+    """
+    producto = productos_map.get(product_base, {})
+    if not producto:
+        return 1, "Sin ficha: equivalencia pendiente"
+    unidades_base = safe_num(producto.get('Unidades por presentación base'), 0)
     tipo = normalize(tipo_presentacion)
-    tipo_producto = normalize(productos_map.get(product_base, {}).get("Tipo Producto", ""))
-
-    if "palito" in tipo_producto or "palito" in raw_norm:
-        p = safe_num(pack_detectado, 0) or detect_pack(raw_name)
-        if is_unit_name(raw_name) or "unidad" in tipo:
-            return 10, "cantidad / 10"
-        if p == 20 or "x20" in tipo:
-            return 0.5, "cantidad * 2"
+    if unidades_base <= 0:
+        return float('nan'), "Sin equivalencia confirmada en el Maestro"
+    if 'unidad' in tipo:
+        unidades = 1
+    elif 'caja' in tipo or 'pack' in tipo:
+        unidades = safe_num(pack_detectado, 0)
+        if unidades <= 0:
+            return float('nan'), "Sin contenido confirmado para esta caja"
+    elif tipo in {'presentacion base', 'producto cerrado', 'sabor 7 800 kg'}:
+        unidades = unidades_base
+    else:
+        return float('nan'), "Presentación sin confirmar en el Maestro"
+    factor = unidades / unidades_base
+    if factor == 1:
         return 1, "cantidad"
-
-    if "7 800" in raw_norm or "sabor" in tipo_producto:
-        return 1, "cantidad"
-
-    if "cerrado" in tipo_producto:
-        return 1, "cantidad"
-
-    if is_unit_name(raw_name) or "unidad" in tipo:
-        pack = safe_num(pack_detectado, 0)
-        if pack <= 0:
-            pack = safe_num(productos_map.get(product_base, {}).get("Compra Mínima", 1), 1)
-        return pack, f"cantidad / {pack:g}"
-
-    return 1, "cantidad"
+    if factor > 1:
+        return 1 / factor, f"cantidad * {factor:g}"
+    return 1 / factor, f"cantidad / {1 / factor:g}"
 
 
 def convert_quantity(raw_name, product_base, quantity, tipo_presentacion, pack_detectado, productos_map):
@@ -489,6 +504,8 @@ def procesar_costo_stock(stock_file, maestro_file, output_file, carrito_file=DEF
 
     stock_rows = read_stock(stock_file, config, alias_map, productos_map, exclusiones)
 
+    if stock_rows['Cantidad Eq'].isna().any():
+        raise ValueError('Hay presentaciones sin equivalencia confirmada. Completalas desde Stock y cámara antes de calcular.')
     stock_grouped = stock_rows.groupby(["Grupo", "SubRubro", "Producto Base"], as_index=False).agg({
         "Cantidad Eq": "sum",
         "Nombre original": lambda x: " + ".join(sorted(set(x.astype(str))))
@@ -616,12 +633,16 @@ def procesar_archivos(stock_file, sabores_file, data_file, maestro_file, output_
     sabores_rows = read_sabores(sabores_file, alias_map, productos_map, exclusiones)
     data_rows = read_data(data_file, config, alias_map, productos_map, exclusiones)
 
+    if stock_rows['Cantidad Eq'].isna().any():
+        raise ValueError('Hay presentaciones sin equivalencia confirmada. Completalas desde Stock y cámara antes de calcular.')
     stock_grouped = stock_rows.groupby(["Grupo", "SubRubro", "Producto Base"], as_index=False).agg({
         "Cantidad Eq": "sum",
         "Nombre original": lambda x: " + ".join(sorted(set(x.astype(str))))
     }).rename(columns={"Cantidad Eq": "Stock", "Nombre original": "Productos agrupados"})
 
     ventas_all = pd.concat([sabores_rows, data_rows], ignore_index=True)
+    if ventas_all['Cantidad Eq'].isna().any():
+        raise ValueError('Hay nombres de ventas sin equivalencia confirmada en el Maestro. Revisá sus presentaciones.')
     ventas_grouped = ventas_all.groupby("Producto Base", as_index=False)["Cantidad Eq"].sum().rename(columns={"Cantidad Eq": "Ventas período"})
 
     final = stock_grouped.merge(ventas_grouped, on="Producto Base", how="outer")

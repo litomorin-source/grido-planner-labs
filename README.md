@@ -1,27 +1,57 @@
-# GridoPlanner Labs 2.5.0 — Control de capacidad de cámara
+# GridoPlanner Labs 3.0.0
 
-Esta es la versión de pruebas. **No subir a producción** hasta validar el funcionamiento.
+Planificación semanal, costos de reposición y stock/cámara.
 
-## Nuevo
-- Bultos actuales al cargar Stock, leyendo la columna `Bultos` de SmartFran **con signo**.
-- Capacidad de referencia editable, inicial 980,98 bultos, calibrada contra el stock del 05/11/2026.
-- Proyección a recepción: bultos stock − consumo estimado durante el tiempo de reposición + bultos del pedido.
-- Consumo por producto a partir del motor de ventas existente, acotado por stock disponible, y convertido por Compra Mínima.
-- Desglose de bultos por grupo y auditoría del consumo/compra por producto.
-- Al generar Informe costo stock, registra también los bultos netos en el CSV histórico. Los registros anteriores permanecen con ese campo vacío.
+## Ejecutar
 
-## Alcance del conteo
-Helado granel, Bombones, Familiares, Líneas especiales heladas, Palitos, Postres, Tentación, Tortas, Frizzio y Congelados Multimarca. No incluye Smoothie, GIO, insumos, descartables ni Gridos M. Prima. Este criterio coincide con 980,98 bultos netos del stock de referencia.
+Instalar requirements.txt y ejecutar `streamlit run app.py`.
+Configurar GITHUB_TOKEN, GITHUB_REPO y GITHUB_BRANCH en secrets de Streamlit.
+No publicar secrets.toml.
 
-## Consideraciones
-- Cada pack de compra del modelo de Carrito/Maestro se considera un bulto de recepción; corroborar con la definición logística del proveedor.
-- La capacidad 980,98 es una **referencia operativa editable**, no un límite técnico certificado.
-- Los artículos no clasificados no aportan consumo proyectado; se evita inventar su equivalencia.
-- Para volver a calcular el pedido después de cambiar Mix o parámetros, presionar ANALIZAR Y GENERAR PEDIDO.
+## Datos operativos
 
-## Pruebas realizadas
-- Validación de sintaxis de los scripts Python.
-- Lectura del stock `Stock_20261105_105903.csv`: 980,98 netos; 1.039,22 positivos; −58,24 negativos.
-- Prueba de motor con archivos de muestra y horizonte de 7 días: consumo estimado 153,76 bultos, 52 bultos de pedido, ocupación al recibir 879,22 (89,6 %). Son resultados de prueba, no una compra sugerida vigente.
+- data/Maestro_Productos_Grido.xlsx: productos, presentaciones/alias, exclusiones y configuración.
+- data/Modelo_de_Carrito.xlsx: catálogo vigente e historial interno _GP_Historial. Se conserva sin cambios en esta versión.
+- data/Omisiones_Futuros_Pedidos.csv: omisiones de Pedido/Costos; no quitan mercadería física de Cámara.
+- data/Historial_Valorizaciones_Stock.csv: registros anteriores intactos; no se recalculan retroactivamente.
 
-Las descargas, el análisis de costos y la gestión de omisiones de Labs 2.4.0 permanecen en el código.
+## Equivalencia única
+
+Compra Mínima = presentaciones base por bulto. Unidades por presentación base = contenido de esa base.
+Alias Unidad equivale a una unidad; alias Caja/pack usa Pack Detectado como unidades contenidas;
+alias Presentación base equivale a una base. No leer gramos/litros como cantidad de unidades.
+Unidades por bulto se deriva, no se almacena duplicado.
+Crocante: 6 bases por bulto, 8 unidades por base. Alfajor: 6 y 6. Palitos: 10 y 10.
+Productos cerrados: base individual, 1; caja sin TACC x12: 12 individuales, no una sola.
+El motor aplica una única función a stock, ventas y tránsito. La cámara también calcula el físico con el Maestro.
+Un dato conocido pero incompleto no se sustituye por Compra Mínima: se pide revisión.
+
+## Exclusiones
+
+La hoja Exclusiones, Excluir=Sí y Activo=No se propagan a todos los alias y a todas las secciones.
+Las omisiones guardadas de Pedidos conservan el comportamiento anterior: excluyen Pedido/Costos,
+pero mantienen el stock físico. No se migran silenciosamente de una categoría a otra.
+
+## Productos nuevos
+
+Stock y cámara → Completar productos. Confirmar bases por bulto, unidades por base y presentación
+de cada nombre. La vista previa muestra el factor; se guarda una sola definición en el Maestro.
+También se puede revisar un producto existente desde ese mismo panel. Si cambia el contenido del
+pack, revisar la equivalencia; cambios de precio no modifican estos datos.
+
+## Capacidad
+
+La referencia 980,98 proviene de un stock anterior expresado en bultos SmartFran, no de una medición.
+Debe revisarse bajo el nuevo criterio. Bultos de packs diferentes tampoco son una medición en m³.
+Los registros históricos de cámara conservan su criterio original.
+
+## Pruebas
+
+`python -m unittest discover -s tests -v`
+Las pruebas que requieren informes privados se habilitan con GRIDO_DATOS_PRUEBA.
+No escriben en GitHub. El adaptador tests/app_interfaz_local.py permite comprobar la UI con guardados en memoria.
+
+## Criterio de desarrollo
+
+Una fuente por dato y una regla compartida. Historial conservado. Las tareas excepcionales se resuelven
+internamente; no se agregan botones permanentes para migraciones de una sola vez.

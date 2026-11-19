@@ -27,6 +27,8 @@ def calcular_costos_mix(sabores_file, data_file, maestro_file, carrito_file, omi
     sabores=read_sabores(sabores_file,am,pmap,exc)
     mix=read_data(data_file,load_config(maestro_file),am,pmap,exc)
 
+    if any(df['Cantidad Eq'].isna().any() for df in (sabores, mix) if not df.empty):
+        raise ValueError('Hay presentaciones de ventas sin equivalencia confirmada en el Maestro.')
     # Kilos de Mix: tomados del archivo original, nunca supuestos desde la cantidad.
     raw=pd.read_excel(data_file)
     cc={normalize(c):c for c in raw.columns}

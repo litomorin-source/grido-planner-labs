@@ -8,8 +8,7 @@ from openpyxl import load_workbook
 import motor
 from core.validators import _parse_price_ar, validar_maestro
 
-MAESTRO = 'data/Maestro_Productos_Grido.xlsx'
-CARRITO = 'data/Modelo_de_Carrito.xlsx'
+from core.rutas import MAESTRO, CARRITO
 TIPOS = ['Sabor 7,800 kg', 'Producto cerrado', 'Fraccionable', 'Palito especial', 'Palito']
 
 
@@ -37,7 +36,7 @@ def catalogo_carrito(path):
     return registros
 
 
-def pendientes_stock(stock_path, maestro_path, carrito_path, incluir_historicos=False):
+def pendientes_stock(stock_path, maestro_path, carrito_path, incluir_historicos=False, revisar_todos=False):
     productos = motor.load_productos(maestro_path)
     # El motor tolera celdas vacías con valor 1. El editor debe mostrarlas como
     # pendientes en lugar de confundir ese valor de respaldo con un dato confirmado.
@@ -67,17 +66,26 @@ def pendientes_stock(stock_path, maestro_path, carrito_path, incluir_historicos=
             motivos.append('Sin código de compra')
         elif not positivo(precios.get(codigo)):
             motivos.append('Sin precio actual ni respaldo histórico; revisar Carrito, no implica asociación incorrecta')
+        if referencias.get(codigo, {}).get('revisar'):
+            motivos.append('El Carrito cambió de presentación: revisar equivalencias')
         minima = equivalencias.get(base)
         if not positivo(minima):
             motivos.append('Sin equivalencia de compra')
+        if not positivo(producto.get('Unidades por presentación base')):
+            motivos.append('Sin unidades por presentación base confirmadas')
         if incluir_historicos and not motivos and referencias.get(codigo, {}).get('fuentes', {}).get('precio') == 'Histórico':
             motivos.append('Asociación conservada con costo histórico. Revisar solo si cambió el código de compra')
+        if grupo['Cantidad Eq'].isna().any():
+            motivos.append('Presentación sin equivalencia confirmada')
+        if revisar_todos and not motivos:
+            motivos.append('Revisión manual de equivalencias')
         if motivos:
             salida.append({'producto': base, 'codigo': codigo, 'motivo': ' · '.join(motivos),
                            'nombres': sorted(set(grupo['Nombre original'])),
                            'grupo': str(grupo.iloc[0]['Grupo']),
                            'minima': minima,
-                           'tipo': producto.get('Tipo Producto', '')})
+                           'tipo': producto.get('Tipo Producto', ''),
+                           'unidades_base': producto.get('Unidades por presentación base')})
     return salida
 
 
@@ -106,7 +114,7 @@ def _fila_nueva(ws):
 
 
 def preparar_producto(maestro_bytes, carrito_path, base, codigo, minima, tipo, peso,
-                      nombres, presentaciones=None, grupo=''):
+                      nombres, presentaciones=None, grupo='', unidades_base=None):
     """Devuelve Excel y vista previa; no escribe archivos ni datos remotos."""
     base = motor.normalize(base)
     codigo = codigo_limpio(codigo)
@@ -124,6 +132,11 @@ def preparar_producto(maestro_bytes, carrito_path, base, codigo, minima, tipo, p
         raise ValueError('El artículo del Carrito debe tener descripción y precio válidos.')
     if base in motor.load_exclusiones(BytesIO(maestro_bytes)):
         raise ValueError('El producto está excluido en el Maestro. Revisá la exclusión antes de editarlo.')
+    existentes_productos = motor.load_productos(BytesIO(maestro_bytes)).set_index('Producto Base')
+    if unidades_base is None and base in existentes_productos.index:
+        unidades_base = existentes_productos.loc[base, 'Unidades por presentación base']
+    if not positivo(unidades_base) or float(unidades_base) != int(float(unidades_base)):
+        raise ValueError('Confirmá las unidades por presentación base (entero mayor que cero).')
     wb = load_workbook(BytesIO(maestro_bytes))
     ws = wb['Productos']
     cols = _cabeceras(ws)
@@ -142,17 +155,18 @@ def preparar_producto(maestro_bytes, carrito_path, base, codigo, minima, tipo, p
     for i in range(2, ws.max_row + 1):
         if i != fila and motor.normalizar_codigo_compra(ws.cell(i, cols['codigo compra']).value) == codigo:
             raise ValueError('Ese código ya está vinculado a otro producto base. Revisá los alias en Administración.')
-    for campo in ['Tipo Producto', 'Peso Compra (kg)']:
+    for campo in ['Tipo Producto', 'Peso Compra (kg)', 'Unidades por presentación base']:
         clave = motor.normalize(campo)
         if clave not in cols:
             col = ws.max_column + 1
             ws.cell(1, col, campo)
             cols[clave] = col
     antes = {c: ws.cell(fila, cols[c]).value for c in
-             ['codigo compra', 'producto compra', 'compra minima', 'tipo producto', 'peso compra kg']}
+             ['codigo compra', 'producto compra', 'compra minima', 'tipo producto', 'peso compra kg', 'unidades por presentacion base']}
     valores = {'producto base': base, 'codigo compra': codigo,
                'producto compra': articulo['descripcion'], 'compra minima': int(minima),
-               'tipo producto': tipo, 'peso compra kg': float(peso)}
+               'tipo producto': tipo, 'peso compra kg': float(peso),
+               'unidades por presentacion base': int(unidades_base)}
     for campo, valor in valores.items():
         ws.cell(fila, cols[campo], valor)
     ws.cell(fila, cols['codigo compra']).number_format = '@'
@@ -174,7 +188,7 @@ def preparar_producto(maestro_bytes, carrito_path, base, codigo, minima, tipo, p
             reglas = {motor.convert_quantity(nombre, base, 1,
                         alias.cell(i, ac['tipo presentacion']).value,
                         alias.cell(i, ac['pack detectado']).value,
-                        {base: {'Compra Mínima': int(minima), 'Tipo Producto': tipo}})[1]
+                        {base: {'Compra Mínima': int(minima), 'Tipo Producto': tipo, 'Unidades por presentación base': int(unidades_base)}})[1]
                       for i in existentes}
             if len(reglas) != 1:
                 raise ValueError(f'El alias {nombre} tiene conversiones contradictorias. Revisalo en Administración.')
@@ -187,10 +201,10 @@ def preparar_producto(maestro_bytes, carrito_path, base, codigo, minima, tipo, p
             if nombre not in presentaciones:
                 raise ValueError(f'Confirmá la presentación del nombre: {nombre}.')
             presentacion, pack = presentaciones[nombre]
-            if presentacion not in ['Presentación base', 'Unidad', 'Caja/pack x20']:
+            if presentacion not in ['Presentación base', 'Unidad', 'Caja/pack']:
                 raise ValueError('Presentación no reconocida.')
-            if presentacion == 'Unidad' and not positivo(pack):
-                raise ValueError('Informá cuántas unidades forman una presentación base.')
+            if presentacion == 'Caja/pack' and not positivo(pack):
+                raise ValueError('Informá cuántas unidades contiene esta caja.')
             af = _fila_nueva(alias)
             alias.cell(af, nombre_col, nombre)
             alias.cell(af, ac['producto base'], base)
@@ -199,15 +213,20 @@ def preparar_producto(maestro_bytes, carrito_path, base, codigo, minima, tipo, p
             for campo, valor in [('origen', 'Stock'), ('grupo', grupo), ('estado', 'OK')]:
                 if campo in ac:
                     alias.cell(af, ac[campo], valor)
+        if existentes and nombre in presentaciones:
+            presentacion, pack = presentaciones[nombre]
+            if presentacion not in ['Presentación base', 'Unidad', 'Caja/pack']:
+                raise ValueError('Confirmá la presentación de cada nombre.')
+            if presentacion == 'Caja/pack' and not positivo(pack):
+                raise ValueError('Confirmá el contenido de la caja.')
+            for i in existentes:
+                alias.cell(i, ac['tipo presentacion'], presentacion)
+                alias.cell(i, ac['pack detectado'], pack)
         _, regla = motor.convert_quantity(nombre, base, 1, presentacion, pack,
-                                         {base: {'Compra Mínima': int(minima), 'Tipo Producto': tipo}})
-        if not existentes:
-            esperado = {'Presentación base': 'cantidad', 'Caja/pack x20': 'cantidad * 2',
-                        'Unidad': f'cantidad / {float(pack or 1):g}' if float(pack or 1) != 1 else 'cantidad'}[presentacion]
-            if regla != esperado:
-                raise ValueError(f'La presentación elegida para {nombre} no coincide con la conversión del motor ({regla}). Revisá el tipo y las unidades; los palitos usan base x10.')
-        if not existentes and 'regla conversion' in ac:
-            alias.cell(af, ac['regla conversion'], regla)
+                                         {base: {'Compra Mínima': int(minima), 'Tipo Producto': tipo, 'Unidades por presentación base': int(unidades_base)}})
+        if 'regla conversion' in ac:
+            for i in (existentes or [af]):
+                alias.cell(i, ac['regla conversion'], regla)
         conversiones.append({'Nombre en stock': nombre, 'Conversión a presentación base': regla,
                              'Alias': 'Conservado' if existentes else 'Nuevo'})
     salida = BytesIO()

@@ -38,8 +38,7 @@ from motor import (
 
 ADMIN_PIN = "2468"
 
-MAESTRO_GITHUB_PATH = "data/Maestro_Productos_Grido.xlsx"
-CARRITO_GITHUB_PATH = "data/Modelo_de_Carrito.xlsx"
+from core.rutas import MAESTRO as MAESTRO_GITHUB_PATH, CARRITO as CARRITO_GITHUB_PATH
 HISTORIAL_STOCK_PATH = "data/Historial_Valorizaciones_Stock.csv"
 OMISIONES_PEDIDO_PATH = "data/Omisiones_Futuros_Pedidos.csv"
 COLUMNAS_HISTORIAL_STOCK = [
@@ -1542,13 +1541,16 @@ def render_generar_pedido(github, pagina="Pedido"):
             )
             if "stock" in paths:
                 try:
-                    capacidad_stock = leer_bultos_stock(paths["stock"])
+                    capacidad_stock = leer_bultos_stock(paths["stock"], maestro_path)
                     st.subheader("Bultos actuales en cámara")
                     cb1, cb2, cb3 = st.columns(3)
                     cb1.metric("Bultos netos", formato_bultos(capacidad_stock["netos"]))
                     cb2.metric("Capacidad referencia", formato_bultos(limite_bultos))
                     cb3.metric("Ocupación actual", f"{capacidad_stock['netos']/limite_bultos*100:,.1f}%".replace(".", ","))
-                    st.caption("Sumatoria NET A de la columna Bultos de SmartFran, incluidos negativos por aperturas de caja pendientes. Incluye helado, impulsivos, Frizzio y congelados multimarca. No incluye Smoothie, insumos ni descartables.")
+                    st.caption("Bultos calculados con las equivalencias del Maestro, incluidos negativos por aperturas de caja pendientes. Se respetan las exclusiones generales. Incluye helado, impulsivos, Frizzio y congelados multimarca. No incluye Smoothie, insumos ni descartables.")
+                    if capacidad_stock.get('sin_conversion'):
+                        st.error('Hay presentaciones sin equivalencia confirmada. Los bultos conocidos no representan la ocupación completa.')
+                    st.caption('La referencia de capacidad anterior se estimó con bultos SmartFran. Revisala al usar las equivalencias unificadas; no es una capacidad física medida.')
                     with st.expander("Ver bultos por grupo", expanded=False):
                         st.dataframe(formatear_bultos(capacidad_stock["por_grupo"]), hide_index=True, use_container_width=True)
                 except Exception as exc:
@@ -1859,7 +1861,7 @@ def render_generar_pedido(github, pagina="Pedido"):
                                 st.error("El pedido supera la capacidad de referencia. Revisá cantidades y almacenamiento antes de comprar.")
                             elif ocup >= 90:
                                 st.warning("La recepción deja la cámara cerca del límite de capacidad.")
-                            elif not proy["transito_sin_conversion"]:
+                            elif not proy["sin_conversion"] and not capacidad_stock.get("sin_conversion"):
                                 st.success("La recepción queda dentro de la capacidad de referencia.")
                             st.caption("El consumo se calcula producto por producto según el mix y se limita al stock disponible de cada uno. No se descuentan insumos, descartables ni ventas no identificadas. Se suma el tránsito pendiente para la fecha estimada. Por prudencia, se descuenta consumo solo contra stock físico; no se anticipan ventas de entregas pendientes. La capacidad es una referencia operativa, no un límite técnico certificado.")
                             if proy["sin_conversion"]:

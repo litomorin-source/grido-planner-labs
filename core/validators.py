@@ -51,6 +51,7 @@ def validar_maestro(maestro_path):
         "codigo compra",
         "producto compra",
         "compra minima",
+        "unidades por presentacion base",
     ]
 
     for req in requeridas_productos:
@@ -63,6 +64,16 @@ def validar_maestro(maestro_path):
         col_prod_compra = cols["producto compra"]
         col_minima = cols["compra minima"]
 
+        col_unidades = cols['unidades por presentacion base']
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not row[col_producto - 1]:
+                continue
+            try:
+                n = float(row[col_unidades - 1])
+                if n <= 0 or n != int(n):
+                    raise ValueError()
+            except (TypeError, ValueError, OverflowError, IndexError):
+                errores.append(f"Unidades por presentación base inválidas: {row[col_producto - 1]}")
         filas_validas = 0
         codigos_validos = 0
         compras_minimas_validas = 0

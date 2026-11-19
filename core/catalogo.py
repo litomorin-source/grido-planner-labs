@@ -14,7 +14,7 @@ import unicodedata
 from openpyxl import load_workbook
 
 HOJA = '_GP_Historial'
-RUTA = 'data/Modelo_de_Carrito.xlsx'
+from core.rutas import CARRITO as RUTA
 CAMPOS = {'descripcion': 'Descripcion', 'precio': 'precio', 'cubicaje': 'Cubicaje',
           'peso': 'Peso', 'disponible': 'Disponible', 'maximo': 'maximo',
           'minimo': 'minimo', 'multiplo': 'multiplo', 'iva': 'impuestoIva',

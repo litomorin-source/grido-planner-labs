@@ -25,7 +25,7 @@ def _decimal_ar(series):
     ).fillna(0.0)
 
 
-def leer_bultos_stock(stock_path):
+def leer_bultos_stock(stock_path, maestro_path=None):
     """Devuelve total neto, desglose de grupos y líneas de stock de la cámara."""
     df = pd.read_csv(Path(stock_path), sep=";", encoding="utf-8-sig", dtype=str)
     obligatorias = {"Rubro", "SubRubro", "Grupo", "Bultos"}
@@ -40,6 +40,25 @@ def leer_bultos_stock(stock_path):
     )
     camara = df.loc[mask].copy()
     camara["Bultos netos"] = _decimal_ar(camara["Bultos"])
+    if maestro_path is not None:
+        import motor
+        productos = motor.load_productos(maestro_path).set_index('Producto Base').to_dict('index')
+        aliases = {r['Alias Normalizado']: r.to_dict() for _, r in motor.load_aliases(maestro_path).iterrows()}
+        excluidos = motor.load_exclusiones(maestro_path)
+        bases = camara['Item'].map(lambda nombre: motor.alias_lookup(nombre, aliases)['Producto Base'])
+        incluido = ~bases.isin(excluidos) & ~camara['Item'].map(motor.normalize).isin(excluidos)
+        incluido &= ~camara['Item'].astype(str).str.contains('desactivado', case=False, na=False)
+        camara = camara.loc[incluido].copy()
+        camara['Bultos SmartFran'] = camara['Bultos netos']
+        cantidades = _decimal_ar(camara['Stock'])
+        bultos = []
+        for (_, row), cantidad in zip(camara.iterrows(), cantidades):
+            info = motor.alias_lookup(row['Item'], aliases)
+            base = info['Producto Base']
+            minima = motor.safe_num(productos.get(base, {}).get('Compra Mínima'), 0)
+            eq, _ = motor.convert_quantity(row['Item'], base, cantidad, info.get('Tipo Presentación', ''), info.get('Pack Detectado'), productos)
+            bultos.append(eq / minima if minima > 0 else float('nan'))
+        camara['Bultos netos'] = bultos
     por_grupo = (camara.groupby("Grupo", as_index=False)["Bultos netos"]
                  .sum().sort_values("Bultos netos", ascending=False))
     total = float(camara["Bultos netos"].sum())
@@ -47,6 +66,7 @@ def leer_bultos_stock(stock_path):
     negativos = float(camara["Bultos netos"].clip(upper=0).sum())
     return {
         "netos": total, "positivos": positivos, "negativos": negativos,
+        "sin_conversion": int(camara["Bultos netos"].isna().sum()),
         "por_grupo": por_grupo, "filas": camara,
     }
 
@@ -62,7 +82,7 @@ def preparar_movimientos_camara(stock_path, maestro_path):
     productos_map = productos.set_index("Producto Base").to_dict(orient="index")
     aliases = motor.load_aliases(maestro_path)
     alias_map = {r["Alias Normalizado"]: r.to_dict() for _, r in aliases.iterrows()}
-    filas = leer_bultos_stock(stock_path)["filas"].copy()
+    filas = leer_bultos_stock(stock_path, maestro_path)["filas"].copy()
     for col in ("Stock", "Tránsito"):
         filas[col] = _decimal_ar(filas[col]) if col in filas else 0.0
     resultado = []
@@ -75,7 +95,7 @@ def preparar_movimientos_camara(stock_path, maestro_path):
         transito, _ = motor.convert_quantity(raw, base, row["Tránsito"], info.get("Tipo Presentación", ""), info.get("Pack Detectado"), productos_map)
         resultado.append({"Producto": base, "Stock físico (eq)": fisico,
                           "Tránsito (eq)": transito, "Compra Mínima": minima,
-                          "Tránsito sin conversión": int(minima <= 0 and row["Tránsito"] != 0)})
+                          "Tránsito sin conversión": int((minima <= 0 or pd.isna(transito)) and row["Tránsito"] != 0)})
     df = pd.DataFrame(resultado, columns=["Producto", "Stock físico (eq)", "Tránsito (eq)", "Compra Mínima", "Tránsito sin conversión"])
     return df.groupby("Producto", as_index=False).agg({
         "Stock físico (eq)": "sum", "Tránsito (eq)": "sum", "Compra Mínima": "first",
