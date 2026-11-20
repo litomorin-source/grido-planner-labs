@@ -47,6 +47,7 @@ def _read_productos(path):
     out["Compra Mínima"] = pd.to_numeric(df[col_minima], errors="coerce")
     out["Activo"] = df[col_activo].astype(str).str.strip() if col_activo else ""
     out["Excluir"] = df[col_excluir].astype(str).str.strip() if col_excluir else ""
+    out["Estado"] = df["Estado"].fillna("").astype(str) if "Estado" in df else ""
     out["Tipo Producto"] = df[col_tipo].astype(str).str.strip() if col_tipo else ""
 
     out = out[out["Producto Key"].notna() & (out["Producto Key"] != "") & (out["Producto Key"] != "nan")]
@@ -76,6 +77,7 @@ def comparar_maestros(maestro_actual_path, maestro_nuevo_path):
         "Activo",
         "Excluir",
         "Tipo Producto",
+        "Estado",
     ]
 
     cambios_rows = []

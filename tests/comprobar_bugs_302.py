@@ -24,18 +24,21 @@ for campo in ['pedido_bytes','carrito_bytes']:
        assert '$' in v.number_format,(campo,s.title,v.coordinate,v.number_format)
        count+=1
  assert count>0
-# Tres candidatos: omitir dos juntos, luego el restante, sin generar de nuevo.
+# Estados: dos cambios juntos y luego otro sin regenerar.
 a.session_state['omision_candidatos']=pd.DataFrame({'Producto':['prueba uno','prueba dos','prueba tres']})
 a.session_state['_permitir_guardado_prueba']=True
 a.run();check(a)
-a.multiselect(key='omision_faltantes_productos').set_value(['prueba uno','prueba dos']).run()
-a.button(key='omision_faltantes_guardar').click().run();check(a)
-assert a.multiselect(key='omision_faltantes_productos').options==['prueba tres']
+a.multiselect(key='estados_productos').set_value(['prueba uno','prueba dos']).run()
+a.selectbox(key='estado_nuevo').set_value('Excluido').run()
+a.button(key='guardar_estados').click().run();check(a)
+assert 'prueba tres' in a.multiselect(key='estados_productos').options
 assert 'pedido_descargas_labs' not in a.session_state
-assert not a.multiselect(key='omision_faltantes_productos').value
-a.multiselect(key='omision_faltantes_productos').set_value(['prueba tres']).run()
-a.button(key='omision_faltantes_guardar').click().run();check(a)
-assert 'prueba tres' in a.session_state['_archivos_prueba']['data/Omisiones_Futuros_Pedidos.csv'].decode('utf-8-sig')
+assert not a.multiselect(key='estados_productos').value
+a.multiselect(key='estados_productos').set_value(['prueba tres']).run()
+a.button(key='guardar_estados').click().run();check(a)
+from core.estados_productos import leer_estados
+estados,_=leer_estados(BytesIO(a.session_state['_archivos_prueba']['data/Maestro_Productos_Grido.xlsx']))
+assert estados['prueba tres']=='Excluido'
 # Capacidad guardada y una sesión enteramente nueva lee el Maestro persistido.
 a.radio(key='navegacion_labs').set_value('Stock y cámara').run();check(a)
 a.number_input(key='capacidad_camara_limite').set_value(1234.0).run()

@@ -146,6 +146,11 @@ def load_productos(maestro_path):
     out["Unidades por presentación base"] = pd.to_numeric(productos[col_unidades], errors="coerce") if col_unidades else np.nan
     out["Activo"] = productos[col_activo].apply(truthy) if col_activo else True
     out["Excluir"] = productos[col_excluir].apply(truthy) if col_excluir else False
+    from core.estados_productos import leer_estados
+    estados, _ = leer_estados(maestro_path)
+    out["Estado"] = out["Producto Base"].map(estados).fillna("Activo")
+    out["Activo"] = out["Estado"].ne("Excluido")
+    out["Excluir"] = out["Estado"].eq("Excluido")
     out = out[out["Producto Base"].notna() & (out["Producto Base"] != "")]
     return out
 
@@ -178,22 +183,10 @@ def load_aliases(maestro_path):
 
 
 def load_exclusiones(maestro_path):
-    try:
-        excl = pd.read_excel(maestro_path, sheet_name="Exclusiones")
-    except Exception:
-        return set()
-
-    col = find_column(excl, ["Producto", "Producto/Opción", "Producto Opcion", "Alias", "Nombre"])
-    if col is None:
-        col = excl.columns[0]
-    excluidos = set(excl[col].dropna().astype(str).apply(normalize))
-    productos = load_productos(maestro_path)
-    excluidos.update(productos.loc[~productos['Activo'] | productos['Excluir'], 'Producto Base'])
+    from core.estados_productos import leer_estados
+    estados, _ = leer_estados(maestro_path)
+    excluidos = {n for n, e in estados.items() if e == 'Excluido'}
     aliases = load_aliases(maestro_path)
-    # Una exclusión se propaga a todos los nombres del mismo producto.
-    for _, fila in aliases.iterrows():
-        if fila['Alias Normalizado'] in excluidos:
-            excluidos.add(fila['Producto Base'])
     excluidos.update(aliases.loc[aliases['Producto Base'].isin(excluidos), 'Alias Normalizado'])
     return excluidos
 
@@ -347,9 +340,10 @@ def read_stock(stock_file, config, alias_map, productos_map, exclusiones):
         rows.append({
             "Origen": "Stock", "Grupo": r.get("Grupo", ""), "SubRubro": r.get("SubRubro", r.get("Rubro", "")),
             "Producto Base": base, "Nombre original": raw, "Cantidad Eq": qty,
-            "Regla Conversión": regla, "Alias Encontrado": info.get("Alias Encontrado", False)
+            "Regla Conversión": regla, "Alias Encontrado": info.get("Alias Encontrado", False),
+            "Tiene existencias": r["Stock"] != 0 or r["Tránsito"] != 0
         })
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["Origen", "Grupo", "SubRubro", "Producto Base", "Nombre original", "Cantidad Eq", "Regla Conversión", "Alias Encontrado", "Tiene existencias"])
 
 
 def read_sabores(sabores_file, alias_map, productos_map, exclusiones):
@@ -586,10 +580,13 @@ def procesar_costo_stock(stock_file, maestro_file, output_file, carrito_file=DEF
         ]
     })
 
+    bases_con_existencias = set(stock_rows.loc[stock_rows['Tiene existencias'], 'Producto Base'])
+    usadas = final[final['Producto Base'].isin(bases_con_existencias)]
+    usa_historicos = bool(usadas['Origen precio'].eq('Histórico').any())
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         resumen.to_excel(writer, index=False, sheet_name="Resumen")
         sin_precio.to_excel(writer, index=False, sheet_name="Sin precio")
-        pd.DataFrame(detalle_referencias(carrito_file, final['Código Compra'])).to_excel(writer, index=False, sheet_name="Referencias catálogo")
+        pd.DataFrame(detalle_referencias(carrito_file, usadas['Código Compra'])).to_excel(writer, index=False, sheet_name="Referencias catálogo")
         categoria.to_excel(writer, index=False, sheet_name="Valorización categoría")
         detalle.to_excel(writer, index=False, sheet_name="Valorización producto")
         stock_negativo.to_excel(writer, index=False, sheet_name="Stock negativo")
@@ -599,6 +596,7 @@ def procesar_costo_stock(stock_file, maestro_file, output_file, carrito_file=DEF
 
     return {
         "detalle": detalle,
+        "usa_costos_historicos": usa_historicos,
         "sin_precio": sin_precio,
         "stock_valorizacion_incompleta": stock_incompleto,
         "categoria": categoria,
@@ -704,6 +702,9 @@ def procesar_archivos(stock_file, sabores_file, data_file, maestro_file, output_
         return ""
 
     final["Observación"] = final.apply(observacion_faltante, axis=1)
+    discontinuados = final['Estado'].eq('Discontinuado')
+    final.loc[discontinuados, 'Reposición necesaria'] = 0
+    final.loc[discontinuados, 'Observación'] = 'Discontinuado: no comprar; conserva stock y costos' 
     final["Compra Mínima"] = pd.to_numeric(final["Compra Mínima"], errors="coerce").fillna(1)
 
     final["Código Compra Normalizado"] = final["Código Compra"].apply(normalizar_codigo_compra)
@@ -862,6 +863,9 @@ def procesar_archivos(stock_file, sabores_file, data_file, maestro_file, output_
         ]
     })
 
+    bases_con_existencias = set(stock_rows.loc[stock_rows['Tiene existencias'], 'Producto Base'])
+    usadas = final[final['Producto Base'].isin(bases_con_existencias) | final['Packs a Comprar'].ne(0)]
+    usa_historicos = bool(usadas['Origen precio'].eq('Histórico').any())
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         advertencias_df.to_excel(writer, index=False, sheet_name="Carrito", startrow=0)
         carrito.to_excel(writer, index=False, sheet_name="Carrito", startrow=len(advertencias_df) + 3)
@@ -874,13 +878,14 @@ def procesar_archivos(stock_file, sabores_file, data_file, maestro_file, output_
         posibles_faltantes.to_excel(writer, index=False, sheet_name="Posibles faltantes")
         sin_clasificar.to_excel(writer, index=False, sheet_name="Sin clasificar")
         sin_precio.to_excel(writer, index=False, sheet_name="Sin precio")
-        pd.DataFrame(detalle_referencias(carrito_file, final['Código Compra'])).to_excel(writer, index=False, sheet_name="Referencias catálogo")
+        pd.DataFrame(detalle_referencias(carrito_file, usadas['Código Compra'])).to_excel(writer, index=False, sheet_name="Referencias catálogo")
         explicacion.to_excel(writer, index=False, sheet_name="Explicación")
 
     format_workbook(output_file)
 
     return {
         "pedido": pedido,
+        "usa_costos_historicos": usa_historicos,
         "sin_precio": sin_precio,
         "pedido_valorizacion_incompleta": pedido_incompleto,
         "stock_valorizacion_incompleta": stock_incompleto,

@@ -17,6 +17,8 @@ from core.config import get_github_config
 from core.github_sync import GitHubSync
 from core.validators import validar_maestro, validar_carrito
 from core.version import APP_VERSION
+from core.estados_productos import leer_estados, guardar_estados, ESTADOS, MIGRACION
+from core.presentacion import costos_a_excel
 from core.maestro_diff import comparar_maestros
 from core.costos_mix import calcular_costos_mix
 from ui.diseno import aplicar_diseno, render_resumen, grafico_historial, SECCIONES
@@ -49,8 +51,16 @@ COLUMNAS_HISTORIAL_STOCK = [
 
 
 
-def leer_omisiones_pedido(github):
-    """Omisiones persistentes independientes del Maestro."""
+def leer_omisiones_pedido(github, maestro_path=None):
+    """Compatibilidad transitoria: solo omisiones anteriores aún sin revisar."""
+    if maestro_path is None:
+        actual = github.download_file_bytes(MAESTRO_GITHUB_PATH)
+        if not actual.get('ok'):
+            raise ValueError('No pude leer el Maestro.')
+        maestro_path = BytesIO(actual['content_bytes'])
+    if str(load_config(maestro_path).get(MIGRACION, '')).lower() in ('sí', 'si'):
+        return []
+    _, revisados = leer_estados(maestro_path)
     info = github.get_file_info(OMISIONES_PEDIDO_PATH)
     if not info.get("ok"):
         raise RuntimeError(info.get("message", "No se pudo consultar la lista de omisiones"))
@@ -61,22 +71,7 @@ def leer_omisiones_pedido(github):
         raise RuntimeError(respuesta.get("message", "No se pudo descargar la lista de omisiones"))
     contenido = respuesta["content_bytes"].decode("utf-8-sig")
     return [fila for fila in csv.DictReader(contenido.splitlines())
-            if str(fila.get("producto_base", "")).strip()]
-
-
-def escribir_omisiones_pedido(github, filas):
-    from io import StringIO
-    buffer = StringIO(newline="")
-    writer = csv.DictWriter(buffer, fieldnames=["producto_base", "fecha", "motivo"], extrasaction="ignore")
-    writer.writeheader()
-    writer.writerows(filas)
-    respuesta = github.upload_bytes_file(
-        path=OMISIONES_PEDIDO_PATH,
-        content_bytes=buffer.getvalue().encode("utf-8-sig"),
-        commit_message="Actualizar omisiones de pedidos GridoPlanner Labs",
-    )
-    if not respuesta.get("ok"):
-        raise RuntimeError(respuesta.get("message", "No se pudo guardar la lista de omisiones"))
+            if str(fila.get("producto_base", "")).strip() and normalize(fila["producto_base"]) not in revisados]
 
 
 def maestro_para_pedido(maestro_path, carpeta, omisiones):
@@ -99,68 +94,40 @@ def maestro_para_pedido(maestro_path, carpeta, omisiones):
     return copia
 
 
-def _control_omitir_faltantes(github, posibles_faltantes):
-    """Omisión reversible que no cambia el Maestro ni su historial."""
-    st.markdown("**Omitir productos discontinuados de pedidos y costos**")
-    st.caption("Se guarda una lista independiente del Maestro. Al marcar un producto, "
-               "se excluye de pedidos, simulaciones y costos del mix de Labs.")
+def _control_omitir_faltantes(github, posibles_faltantes, maestro_path):
+    st.markdown("**Estado de los productos**")
+    st.caption("Se guarda en el Maestro. Discontinuado: no comprar, conservar stock y costos. Excluido: fuera de todos los análisis. Activo: volver a incluir.")
     try:
-        omisiones = leer_omisiones_pedido(github)
+        estados, _ = leer_estados(maestro_path)
+        pendientes = leer_omisiones_pedido(github, maestro_path)
     except Exception as exc:
-        st.error(f"No pude cargar las omisiones: {exc}")
+        st.error(f"No pude leer los estados: {exc}")
         return
-
-    activos = {normalize(f.get("producto_base", "")) for f in omisiones}
-    if posibles_faltantes is not None and not posibles_faltantes.empty and "Producto" in posibles_faltantes.columns:
-        candidatos = sorted({str(x).strip() for x in posibles_faltantes["Producto"].dropna()
-                             if str(x).strip() and normalize(x) not in activos})
-        if candidatos:
-            elegidos = st.multiselect("Productos a omitir", candidatos, key="omision_faltantes_productos")
-            if st.button("OMITIR DE PEDIDOS Y COSTOS", key="omision_faltantes_guardar", disabled=not elegidos):
-                try:
-                    actual = leer_omisiones_pedido(github)
-                    activos_actuales = {normalize(f.get("producto_base", "")) for f in actual}
-                    for elegido in elegidos:
-                        base = normalize(elegido)
-                        if base not in activos_actuales:
-                            actual.append({"producto_base": base,
-                                "fecha": datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).isoformat(timespec="seconds"),
-                                "motivo": "Marcado como discontinuado desde Posibles faltantes"})
-                            activos_actuales.add(base)
-                    escribir_omisiones_pedido(github, actual)
-                except Exception as exc:
-                    st.error(f"No se pudieron guardar las omisiones: {exc}")
-                    return
-                # Evitar mostrar o descargar un pedido calculado antes del cambio.
-                st.session_state.pop("pedido_descargas_labs", None)
-                st.session_state.pop("ultimo_analisis_snapshot", None)
-                st.session_state.pop("costos_mix_actual", None)
-                st.session_state["mensaje_omision_pedido"] = (
-                    f"{len(elegidos)} producto(s) omitido(s). Podés seguir eligiendo; cuando termines, generá el pedido para actualizarlo."
-                )
-                st.rerun()
-        else:
-            st.info("No hay nuevos faltantes para omitir en este análisis.")
-
-    if omisiones:
-        with st.expander(f"Administrar omisiones guardadas ({len(omisiones)})", expanded=False):
-            opciones = sorted({f.get("producto_base", "") for f in omisiones if f.get("producto_base")})
-            quitar = st.selectbox("Producto que querés volver a incluir", opciones, key="omision_faltantes_revertir_producto")
-            if st.button("VOLVER A INCLUIR", key="omision_faltantes_revertir"):
-                try:
-                    actual = leer_omisiones_pedido(github)
-                    nuevos = [f for f in actual if normalize(f.get("producto_base", "")) != normalize(quitar)]
-                    escribir_omisiones_pedido(github, nuevos)
-                except Exception as exc:
-                    st.error(f"No se pudo revertir la omisión: {exc}")
-                    return
-                st.session_state.pop("pedido_descargas_labs", None)
-                st.session_state.pop("ultimo_analisis_snapshot", None)
-                st.session_state.pop("costos_mix_actual", None)
-                st.session_state["mensaje_omision_pedido"] = (
-                    f"{quitar}: nuevamente incluido en pedidos y costos. Recalculá el análisis que necesites."
-                )
-                st.rerun()
+    opciones = set(estados) | {normalize(f['producto_base']) for f in pendientes}
+    if posibles_faltantes is not None and not posibles_faltantes.empty:
+        opciones.update(normalize(x) for x in posibles_faltantes['Producto'].dropna())
+    if pendientes:
+        st.warning("Revisión inicial: estas omisiones anteriores todavía excluyen de pedidos y costos, pero conservan el stock. Clasificalas antes de dar por terminada la actualización.")
+        st.write(', '.join(sorted(f['producto_base'] for f in pendientes)))
+    elegidos = st.multiselect("Productos a actualizar", sorted(opciones),
+        placeholder="Seleccioná uno o varios productos", key="estados_productos")
+    estado = st.selectbox("Nuevo estado", ESTADOS, index=None,
+        placeholder="Seleccioná el estado", key="estado_nuevo")
+    if elegidos:
+        st.dataframe(pd.DataFrame([{'Producto': n, 'Estado actual':
+            'Omisión anterior pendiente' if n in {normalize(f['producto_base']) for f in pendientes}
+            else estados.get(n, 'Activo')} for n in elegidos]), hide_index=True)
+    if st.button("GUARDAR ESTADOS EN EL MAESTRO", key="guardar_estados", disabled=not elegidos or estado is None):
+        try:
+            guardar_estados(github, maestro_path.read_bytes(), {n: estado for n in elegidos}, pendientes)
+        except Exception as exc:
+            st.error(f"No se guardaron los cambios: {exc}")
+            return
+        for clave in ('pedido_descargas_labs', 'ultimo_analisis_snapshot', 'costos_mix_actual', 'informe_stock_bytes_260'):
+            st.session_state.pop(clave, None)
+        st.session_state.pop('estados_productos', None)
+        st.session_state['mensaje_omision_pedido'] = f"Estado {estado} guardado para {len(elegidos)} producto(s). Podés seguir modificando otros; recalculá al terminar."
+        st.rerun()
 
 def fecha_desde_nombre_stock(nombre):
     """SmartFran: Stock_YYYYMMDD_HHMMSS.csv. Hora local de Argentina."""
@@ -1405,7 +1372,7 @@ def render_generar_pedido(github, pagina="Pedido"):
             tiempo_reposicion = st.number_input("Tiempo de reposición", min_value=0.0, max_value=8.0, value=1.0, step=0.5)
         with cfg3:
             dias_analizados = st.number_input("Días analizados", min_value=1, max_value=60, value=14, step=1)
-        st.caption("Estos parámetros se conservan al cambiar de sección. Las omisiones se administran desde Pedido.")
+        st.caption("Estos parámetros se conservan al cambiar de sección. Los estados de productos se administran desde Pedido.")
 
     ready = True
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1487,7 +1454,7 @@ def render_generar_pedido(github, pagina="Pedido"):
         # Se verifica ANTES de mostrar cualquier resultado o descarga persistente.
         omisiones_ok = True
         try:
-            omisiones_vigentes = leer_omisiones_pedido(github)
+            omisiones_vigentes = leer_omisiones_pedido(github, maestro_path)
         except Exception as exc:
             omisiones_ok = False
             ready = False
@@ -1507,7 +1474,7 @@ def render_generar_pedido(github, pagina="Pedido"):
         )
         huella_candidatos = huella_analisis(
             {**{k: v.getvalue() for k, v in archivos.items()},
-             "maestro": maestro_path.read_bytes(), "carrito": carrito_path.read_bytes()}, params_actuales, [])
+             "carrito": carrito_path.read_bytes()}, params_actuales, [])
         if st.session_state.get("omision_huella_candidatos") != huella_candidatos:
             st.session_state.pop("omision_candidatos", None)
             st.session_state["omision_huella_candidatos"] = huella_candidatos
@@ -1562,7 +1529,7 @@ def render_generar_pedido(github, pagina="Pedido"):
                 prod_map = prod_stock.set_index('Producto Base').to_dict('index')
                 alias_map = {r['Alias Normalizado']: dict(r) for _, r in load_aliases(maestro_path).iterrows()}
                 filas_stock = read_stock(paths['stock'], load_config(maestro_path), alias_map, prod_map, load_exclusiones(maestro_path))
-                bases_stock = set(filas_stock['Producto Base']) if not filas_stock.empty else set()
+                bases_stock = set(filas_stock.loc[filas_stock['Tiene existencias'], 'Producto Base']) if not filas_stock.empty else set()
                 mostrar_referencias_stock(carrito_path, prod_stock.loc[prod_stock['Producto Base'].isin(bases_stock), 'Código Compra'])
                 render_completar_productos(github, paths["stock"], maestro_path, carrito_path, ADMIN_PIN)
             st.subheader("Informe costo stock")
@@ -1584,14 +1551,14 @@ def render_generar_pedido(github, pagina="Pedido"):
                             detalle_stock=result_stock.get("detalle"), categorias_stock=result_stock.get("categoria"),
                             bultos_netos=capacidad_stock["netos"] if capacidad_stock is not None else None,
                             valorizacion_completa=not result_stock.get("stock_valorizacion_incompleta", False),
-                            usa_costos_historicos=bool(result_stock['detalle']['Origen precio'].eq('Histórico').any()),
+                            usa_costos_historicos=result_stock['usa_costos_historicos'],
                         )
                         if guardado:
                             st.success(f"Valorización guardada en el historial · {resultado_guardado}")
                         else:
                             st.error(f"El informe se generó, pero NO se guardó en el historial: {resultado_guardado}")
                         detalle_referencia = result_stock.get('detalle')
-                        if detalle_referencia is not None and 'Origen precio' in detalle_referencia and detalle_referencia['Origen precio'].eq('Histórico').any():
+                        if result_stock['usa_costos_historicos']:
                             st.warning('La valorización incluye costos históricos. Revisá las fechas en Referencias catálogo del informe; los registros anteriores del historial no se recalculan.')
                         incompleto = result_stock.get("stock_valorizacion_incompleta", False)
                         st.metric("Subtotal stock conocido" if incompleto else "Valor stock actual", formato_moneda_ar(valor_total_stock))
@@ -1658,10 +1625,6 @@ def render_generar_pedido(github, pagina="Pedido"):
                 st.markdown("---")
                 st.subheader("Análisis según tu mix de ventas del período")
                 st.caption("Costo de referencia del mix: precios actuales del Carrito y, cuando faltan, últimos datos compatibles guardados. Los históricos se identifican por producto; no son precios vigentes ni CMV contable.")
-                st.caption("Se aplica la misma lista de omisiones de Pedidos. Los productos omitidos no participan del costo ni de la cobertura de este análisis.")
-                if omisiones_vigentes:
-                    with st.expander(f"Productos omitidos también en Costos ({len(omisiones_vigentes)})"):
-                        st.write(", ".join(sorted(f["producto_base"] for f in omisiones_vigentes)))
                 if not omisiones_ok:
                     st.error("No pude verificar las omisiones guardadas. Reintentá antes de calcular costos.")
                 if st.button("CALCULAR COSTOS SEGÚN MI MIX", key="costos_mix_240", use_container_width=True, disabled=not omisiones_ok):
@@ -1706,9 +1669,9 @@ def render_generar_pedido(github, pagina="Pedido"):
                             use_container_width=True, hide_index=True,
                         )
                         st.download_button(
-                            "DESCARGAR PRODUCTOS SIN COBERTURA (CSV)",
-                            data=sin_cobertura.drop(columns=["clave"], errors="ignore").to_csv(index=False).encode("utf-8-sig"),
-                            file_name="Productos_sin_cobertura_costos.csv", mime="text/csv",
+                            "DESCARGAR PRODUCTOS SIN COBERTURA (EXCEL)",
+                            data=costos_a_excel(sin_cobertura),
+                            file_name="Productos_sin_cobertura_costos.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             key="desc_sin_cobertura_costos_260", on_click="ignore",
                         )
                     sin_peso = pd.to_numeric(
@@ -1723,7 +1686,7 @@ def render_generar_pedido(github, pagina="Pedido"):
                         )
                     with st.expander("Auditar todos los costos por producto"):
                         st.dataframe(formatear_importes_informe(detalle_costos.drop(columns=["clave"], errors="ignore")), use_container_width=True, hide_index=True)
-                    st.download_button("DESCARGAR DETALLE DE COSTOS (CSV)",detalle_costos.to_csv(index=False).encode("utf-8-sig"),file_name="Costos_segun_mix.csv",mime="text/csv",key="desc_costos_mix_240",on_click="ignore")
+                    st.download_button("DESCARGAR DETALLE DE COSTOS (EXCEL)",costos_a_excel(detalle_costos, indicadores),file_name="Costos_segun_mix.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",key="desc_costos_mix_240",on_click="ignore")
 
             else:
                 st.info("Para calcular costos según tu mix necesitás Cajas por Sabor y Mix de Ventas validados. No necesitás Stock.")
@@ -1812,8 +1775,8 @@ def render_generar_pedido(github, pagina="Pedido"):
                     with zona_descargas:
                         _descargas_pedido_aisladas()
                     proy = None
-                    if 'Origen precio' in pedido and pedido['Origen precio'].eq('Histórico').any():
-                        st.warning('El stock incluye productos con últimos costos conocidos. Las compras usan artículos vigentes; revisá Referencias catálogo del Excel.')
+                    if result.get('usa_costos_historicos', False):
+                        st.warning('Este análisis usa últimos costos conocidos para stock, tránsito o compras. Revisá las fechas en Referencias catálogo del Excel.')
                     revisiones_compra = pedido[pedido['Observación'].str.contains('Compra pendiente|Cantidad ajustada', na=False)]
                     if not revisiones_compra.empty:
                         with st.expander('Compras ajustadas o pendientes por el Carrito', expanded=True):
@@ -1900,8 +1863,8 @@ def render_generar_pedido(github, pagina="Pedido"):
                 st.info("Cargá los tres archivos para generar tu pedido. Podés consultar Stock y cámara con el stock solamente.")
 
             if omisiones_ok:
-                with st.expander("Omitir productos de Pedidos y Costos", expanded=True):
-                    _control_omitir_faltantes(github, st.session_state.get("omision_candidatos"))
+                with st.expander("Administrar estados de productos", expanded=True):
+                    _control_omitir_faltantes(github, st.session_state.get("omision_candidatos"), maestro_path)
 
         with tab_pallets:
             st.subheader("Optimizador de pallets")

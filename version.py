@@ -1,1 +1,1 @@
-APP_VERSION = "Labs 3.0.2"
+from core.version import APP_VERSION
