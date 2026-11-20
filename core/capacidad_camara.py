@@ -207,3 +207,39 @@ def proyectar_capacidad(pedido, bultos_actuales, dias_analizados, semanas_reposi
                         "Consumo hasta recepción (eq)", "Consumo descontado (bultos)",
                         "Packs a Comprar", "Bultos a recibir"]].copy(),
     }
+
+
+PARAMETRO_CAPACIDAD = "Capacidad de referencia de cámara (bultos)"
+
+
+def guardar_capacidad(github, maestro_original, valor):
+    """Actualiza solo la referencia de cámara y protege cambios concurrentes."""
+    import math
+    from io import BytesIO
+    from openpyxl import load_workbook
+    from core.rutas import MAESTRO
+    valor = float(valor)
+    if not math.isfinite(valor) or not 1 <= valor <= 100000:
+        raise ValueError("La capacidad debe estar entre 1 y 100000 bultos.")
+    actual = github.download_file_bytes(MAESTRO)
+    if not actual.get('ok') or not actual.get('sha'):
+        raise ValueError("No pude verificar el Maestro. No se guardó la capacidad.")
+    if actual['content_bytes'] != maestro_original:
+        raise ValueError("El Maestro cambió. Recargá la pantalla antes de guardar.")
+    wb = load_workbook(BytesIO(maestro_original))
+    ws = wb['Configuración'] if 'Configuración' in wb.sheetnames else wb.create_sheet('Configuración')
+    if ws.cell(1, 1).value is None:
+        ws.cell(1, 1, 'Parámetro'); ws.cell(1, 2, 'Valor')
+    columnas = {str(c.value).strip(): c.column for c in ws[1]}
+    pc = columnas.get('Parámetro', columnas.get('Parametro'))
+    vc = columnas.get('Valor')
+    if not pc or not vc:
+        raise ValueError("La hoja Configuración necesita columnas Parámetro y Valor.")
+    fila = next((r for r in range(2, ws.max_row+1) if ws.cell(r, pc).value == PARAMETRO_CAPACIDAD), ws.max_row+1)
+    ws.cell(fila, pc, PARAMETRO_CAPACIDAD); ws.cell(fila, vc, valor)
+    salida = BytesIO(); wb.save(salida)
+    resultado = github.upload_bytes_file(path=MAESTRO, content_bytes=salida.getvalue(),
+        expected_sha=actual['sha'], commit_message=f'Guardar capacidad de cámara: {valor:g} bultos')
+    if not resultado.get('ok'):
+        raise ValueError(resultado.get('message', 'No se pudo guardar la capacidad.'))
+    return resultado

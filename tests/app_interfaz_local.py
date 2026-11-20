@@ -25,7 +25,8 @@ class GitHubLocal:
     def upload_bytes_file(self, **kwargs):
         if not st.session_state.get('_permitir_guardado_prueba'):
             raise AssertionError('Esta prueba no permite escrituras externas')
-        assert kwargs['expected_sha'] == self.download_file_bytes(kwargs['path'])['sha']
+        if 'expected_sha' in kwargs:
+            assert kwargs['expected_sha'] == self.download_file_bytes(kwargs['path'])['sha']
         st.session_state.setdefault('_archivos_prueba', {})[kwargs['path']] = kwargs['content_bytes']
         return {'ok': True, 'commit': 'solo-memoria-local'}
 

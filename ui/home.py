@@ -22,12 +22,13 @@ from core.costos_mix import calcular_costos_mix
 from ui.diseno import aplicar_diseno, render_resumen, grafico_historial, SECCIONES
 from ui.carrito import render_actualizar_carrito, mostrar_referencias_stock
 from ui.productos import render_completar_productos
-from core.presentacion import formato_bultos, formatear_bultos
+from core.presentacion import formato_bultos, formatear_bultos, formatear_monedas_excel
 from core.estado_analisis import huella_analisis, invalidar_si_cambio
 from core.fechas_entrega import miercoles_semana_siguiente, semanas_hasta_recepcion
-from core.capacidad_camara import preparar_movimientos_camara, leer_bultos_stock, proyectar_capacidad, CAPACIDAD_REFERENCIA
+from core.capacidad_camara import preparar_movimientos_camara, leer_bultos_stock, proyectar_capacidad, CAPACIDAD_REFERENCIA, PARAMETRO_CAPACIDAD, guardar_capacidad
 
 from motor import (
+    load_config,
     procesar_archivos,
     procesar_costo_stock,
     validar_stock,
@@ -114,28 +115,28 @@ def _control_omitir_faltantes(github, posibles_faltantes):
         candidatos = sorted({str(x).strip() for x in posibles_faltantes["Producto"].dropna()
                              if str(x).strip() and normalize(x) not in activos})
         if candidatos:
-            elegido = st.selectbox("Producto a omitir", candidatos, key="omision_faltantes_producto")
-            if st.button("OMITIR DE PEDIDOS Y COSTOS", key="omision_faltantes_guardar"):
-                base = normalize(elegido)
-                # Releer antes de guardar por si otro usuario hizo una modificación.
-                actual = leer_omisiones_pedido(github)
-                if base not in {normalize(f.get("producto_base", "")) for f in actual}:
-                    actual.append({
-                        "producto_base": base,
-                        "fecha": datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).isoformat(timespec="seconds"),
-                        "motivo": "Marcado como discontinuado desde Posibles faltantes",
-                    })
-                    try:
-                        escribir_omisiones_pedido(github, actual)
-                    except Exception as exc:
-                        st.error(f"No se pudo guardar la omisión: {exc}")
-                        return
+            elegidos = st.multiselect("Productos a omitir", candidatos, key="omision_faltantes_productos")
+            if st.button("OMITIR DE PEDIDOS Y COSTOS", key="omision_faltantes_guardar", disabled=not elegidos):
+                try:
+                    actual = leer_omisiones_pedido(github)
+                    activos_actuales = {normalize(f.get("producto_base", "")) for f in actual}
+                    for elegido in elegidos:
+                        base = normalize(elegido)
+                        if base not in activos_actuales:
+                            actual.append({"producto_base": base,
+                                "fecha": datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).isoformat(timespec="seconds"),
+                                "motivo": "Marcado como discontinuado desde Posibles faltantes"})
+                            activos_actuales.add(base)
+                    escribir_omisiones_pedido(github, actual)
+                except Exception as exc:
+                    st.error(f"No se pudieron guardar las omisiones: {exc}")
+                    return
                 # Evitar mostrar o descargar un pedido calculado antes del cambio.
                 st.session_state.pop("pedido_descargas_labs", None)
                 st.session_state.pop("ultimo_analisis_snapshot", None)
                 st.session_state.pop("costos_mix_actual", None)
                 st.session_state["mensaje_omision_pedido"] = (
-                    f"{elegido}: omitido de pedidos y costos. Volvé a generar el pedido o calcular costos para aplicar el cambio."
+                    f"{len(elegidos)} producto(s) omitido(s). Podés seguir eligiendo; cuando termines, generá el pedido para actualizarlo."
                 )
                 st.rerun()
         else:
@@ -583,6 +584,7 @@ def generar_carrito_importacion(pedido, carrito_path):
         hoja.delete_rows(nro_fila, 1)
 
     salida = BytesIO()
+    formatear_monedas_excel(libro)
     libro.save(salida)
     return salida.getvalue(), len(encontrados), sum(pedidos.values())
 
@@ -850,27 +852,6 @@ def subir_archivo_validado(label, uploader_label, destino, validator, filename, 
             else:
                 st.error(result["message"])
                 st.code(result.get("details", ""))
-
-def aplicar_formato_pesos_excel_pedido(ruta_excel):
-    """Formato visual en Excel: no convierte importes a texto ni altera cálculos."""
-    libro = load_workbook(ruta_excel)
-    columnas_pesos = {
-        "Valor Pedido Sugerido", "Valor Stock Actual", "Precio Pack",
-        "Costo de reposición", "Costo", "Precio", "Importe",
-    }
-    formato = '"$ "#,##0;[Red]"-$ "#,##0;"$ "0'
-    for hoja in libro.worksheets:
-        # El bloque Carrito tiene advertencias al principio y encabezados más abajo.
-        for fila in hoja.iter_rows():
-            for celda in fila:
-                if not isinstance(celda.value, str) or celda.value.strip() not in columnas_pesos:
-                    continue
-                columna = celda.column
-                for siguiente in hoja.iter_rows(min_row=celda.row + 1, min_col=columna, max_col=columna):
-                    valor = siguiente[0]
-                    if isinstance(valor.value, (int, float)) and not isinstance(valor.value, bool):
-                        valor.number_format = formato
-    libro.save(ruta_excel)
 
 
 def _ventas_col(pedido):
@@ -1524,6 +1505,12 @@ def render_generar_pedido(github, pagina="Pedido"):
              "maestro": maestro_path.read_bytes(), "carrito": carrito_path.read_bytes()},
             params_actuales, omisiones_vigentes,
         )
+        huella_candidatos = huella_analisis(
+            {**{k: v.getvalue() for k, v in archivos.items()},
+             "maestro": maestro_path.read_bytes(), "carrito": carrito_path.read_bytes()}, params_actuales, [])
+        if st.session_state.get("omision_huella_candidatos") != huella_candidatos:
+            st.session_state.pop("omision_candidatos", None)
+            st.session_state["omision_huella_candidatos"] = huella_candidatos
         if invalidar_si_cambio(st.session_state, huella_actual):
             with tab_pedido:
                 st.warning("Los archivos, parámetros o las omisiones cambiaron. Volvé a ANALIZAR Y GENERAR PEDIDO para habilitar las descargas actualizadas.")
@@ -1533,12 +1520,24 @@ def render_generar_pedido(github, pagina="Pedido"):
             # resto de los archivos ni ejecutar el cálculo del pedido.
             st.subheader("Stock y cámara")
             capacidad_stock = None
+            capacidad_guardada = float(load_config(maestro_path).get(PARAMETRO_CAPACIDAD, CAPACIDAD_REFERENCIA))
+            if st.session_state.get("capacidad_guardada_origen") != capacidad_guardada:
+                st.session_state["capacidad_camara_limite"] = capacidad_guardada
+                st.session_state["capacidad_guardada_origen"] = capacidad_guardada
             limite_bultos = st.number_input(
                 "Capacidad de referencia de cámara (bultos)",
-                min_value=1.0, max_value=100000.0, value=float(CAPACIDAD_REFERENCIA),
+                min_value=1.0, max_value=100000.0, value=capacidad_guardada,
                 step=1.0, format="%.0f", key="capacidad_camara_limite",
-                help="Referencia inicial: stock neto del 05/11/2026 cuando la cámara estaba al límite. Es editable."
+                help="Guardá la referencia en el Maestro para conservarla al reiniciar."
             )
+            st.caption(f"Referencia guardada: {formato_bultos(capacidad_guardada)} bultos")
+            if st.button("Guardar capacidad de cámara", key="guardar_capacidad_camara"):
+                try:
+                    guardar_capacidad(github, maestro_path.read_bytes(), limite_bultos)
+                    st.session_state["mensaje_alta_producto"] = "Capacidad de cámara guardada en el Maestro."
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No se guardó la capacidad: {exc}")
             if "stock" in paths:
                 try:
                     capacidad_stock = leer_bultos_stock(paths["stock"], maestro_path)
@@ -1558,7 +1557,7 @@ def render_generar_pedido(github, pagina="Pedido"):
 
             st.markdown("---")
             if pagina == "Stock y cámara" and validez["stock"]:
-                from motor import load_config, load_productos, load_aliases, load_exclusiones, read_stock
+                from motor import load_productos, load_aliases, load_exclusiones, read_stock
                 prod_stock = load_productos(maestro_path)
                 prod_map = prod_stock.set_index('Producto Base').to_dict('index')
                 alias_map = {r['Alias Normalizado']: dict(r) for _, r in load_aliases(maestro_path).iterrows()}
@@ -1756,6 +1755,7 @@ def render_generar_pedido(github, pagina="Pedido"):
                         pedido = result["pedido"]
                         sin_clasificar = result["sin_clasificar"]
                         posibles_faltantes = result.get("posibles_faltantes")
+                        st.session_state["omision_candidatos"] = posibles_faltantes
                         stock_negativo = result.get("stock_negativo")
 
                         st.session_state["ultimo_analisis_snapshot"] = {
@@ -1772,7 +1772,6 @@ def render_generar_pedido(github, pagina="Pedido"):
                         }
 
                         # Aplicar solo formato visual al Excel generado; importes siguen siendo numéricos.
-                        aplicar_formato_pesos_excel_pedido(output)
 
                         # Conservar los dos archivos antes de que Streamlit vuelva a ejecutar la página.
                         pedido_bytes = output.read_bytes()
@@ -1893,19 +1892,16 @@ def render_generar_pedido(github, pagina="Pedido"):
                     if stock_negativo is not None and len(stock_negativo) > 0:
                         with st.expander("Ver stock negativo", expanded=False):
                             st.dataframe(formatear_importes_informe(stock_negativo), use_container_width=True)
-                    if posibles_faltantes is not None and len(posibles_faltantes) > 0:
-                        with st.expander("Ver posibles faltantes", expanded=True):
-                            st.dataframe(formatear_importes_informe(posibles_faltantes), use_container_width=True)
-                            _control_omitir_faltantes(github, posibles_faltantes)
-                    else:
-                        with st.expander("Productos omitidos de Pedidos y Costos", expanded=False):
-                            _control_omitir_faltantes(github, None)
                     if len(sin_clasificar) > 0:
                         with st.expander("Ver productos sin clasificar", expanded=False):
                             st.dataframe(sin_clasificar, use_container_width=True)
 
             else:
                 st.info("Cargá los tres archivos para generar tu pedido. Podés consultar Stock y cámara con el stock solamente.")
+
+            if omisiones_ok:
+                with st.expander("Omitir productos de Pedidos y Costos", expanded=True):
+                    _control_omitir_faltantes(github, st.session_state.get("omision_candidatos"))
 
         with tab_pallets:
             st.subheader("Optimizador de pallets")
