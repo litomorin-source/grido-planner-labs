@@ -469,6 +469,8 @@ def format_workbook(path):
                 if str(cell.value).strip() == "Código Compra":
                     ws_carrito.column_dimensions[cell.column_letter].width = 15
 
+    from core.presentacion import formatear_monedas_excel
+    formatear_monedas_excel(wb)
     wb.save(path)
 
 

@@ -1,4 +1,4 @@
-# GridoPlanner Labs 3.0.1
+# GridoPlanner Labs 3.0.2
 
 Planificación semanal, costos de reposición y stock/cámara.
 
@@ -61,3 +61,7 @@ internamente; no se agregan botones permanentes para migraciones de una sola vez
 La cantidad sugerida depende del stock, ventas, semanas configuradas y equivalencias del Maestro. Las restricciones del Carrito (disponibilidad, máximos, mínimos y múltiplos) solo generan advertencias. Un código ausente, precio pendiente o presentación para revisar no reduce la cantidad a cero. Los cambios de nombre por sí solos no bloquean ni descartan un costo histórico. Los cambios físicos de peso/cubicaje siguen marcados para revisar; no se modifican equivalencias automáticamente.
 
 El archivo de importación al proveedor requiere que sus códigos existan en la plantilla: si faltan, se informa el problema sin quitar productos del informe de pedido.
+
+## Correcciones 3.0.2
+
+Formato monetario compartido para los Excel de Pedido, Stock y Carrito de importación. La capacidad de cámara se guarda desde Stock y cámara en Configuración del Maestro con control de versión. Las omisiones permiten selección múltiple o sucesiva sin perder candidatos; las descargas anteriores se invalidan y se recalcula al terminar. No cambian las fórmulas de compra.
