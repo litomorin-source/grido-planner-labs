@@ -17,7 +17,7 @@ from core.config import get_github_config
 from core.github_sync import GitHubSync
 from core.validators import validar_maestro, validar_carrito
 from core.version import APP_VERSION
-from core.estados_productos import leer_estados, guardar_estados, ESTADOS, MIGRACION
+from core.estados_productos import leer_estados, guardar_estados, MIGRACION
 from core.presentacion import costos_a_excel
 from core.maestro_diff import comparar_maestros
 from core.costos_mix import calcular_costos_mix
@@ -95,39 +95,49 @@ def maestro_para_pedido(maestro_path, carpeta, omisiones):
 
 
 def _control_omitir_faltantes(github, posibles_faltantes, maestro_path):
-    st.markdown("**Estado de los productos**")
-    st.caption("Se guarda en el Maestro. Discontinuado: no comprar, conservar stock y costos. Excluido: fuera de todos los análisis. Activo: volver a incluir.")
+    """Solo sugiere candidatos del análisis; lo ya decidido queda en consulta."""
     try:
         estados, _ = leer_estados(maestro_path)
-        pendientes = leer_omisiones_pedido(github, maestro_path)
+        anteriores = leer_omisiones_pedido(github, maestro_path)
     except Exception as exc:
-        st.error(f"No pude leer los estados: {exc}")
+        st.error(f"No pude consultar los productos excluidos: {exc}")
         return
-    opciones = set(estados) | {normalize(f['producto_base']) for f in pendientes}
+    omitidos = {normalize(f['producto_base']) for f in anteriores}
+    opciones = set()
     if posibles_faltantes is not None and not posibles_faltantes.empty:
-        opciones.update(normalize(x) for x in posibles_faltantes['Producto'].dropna())
-    if pendientes:
-        st.warning("Revisión inicial: estas omisiones anteriores todavía excluyen de pedidos y costos, pero conservan el stock. Clasificalas antes de dar por terminada la actualización.")
-        st.write(', '.join(sorted(f['producto_base'] for f in pendientes)))
-    elegidos = st.multiselect("Productos a actualizar", sorted(opciones),
-        placeholder="Seleccioná uno o varios productos", key="estados_productos")
-    estado = st.selectbox("Nuevo estado", ESTADOS, index=None,
-        placeholder="Seleccioná el estado", key="estado_nuevo")
-    if elegidos:
-        st.dataframe(pd.DataFrame([{'Producto': n, 'Estado actual':
-            'Omisión anterior pendiente' if n in {normalize(f['producto_base']) for f in pendientes}
-            else estados.get(n, 'Activo')} for n in elegidos]), hide_index=True)
-    if st.button("GUARDAR ESTADOS EN EL MAESTRO", key="guardar_estados", disabled=not elegidos or estado is None):
-        try:
-            guardar_estados(github, maestro_path.read_bytes(), {n: estado for n in elegidos}, pendientes)
-        except Exception as exc:
-            st.error(f"No se guardaron los cambios: {exc}")
-            return
-        for clave in ('pedido_descargas_labs', 'ultimo_analisis_snapshot', 'costos_mix_actual', 'informe_stock_bytes_260'):
-            st.session_state.pop(clave, None)
-        st.session_state.pop('estados_productos', None)
-        st.session_state['mensaje_omision_pedido'] = f"Estado {estado} guardado para {len(elegidos)} producto(s). Podés seguir modificando otros; recalculá al terminar."
-        st.rerun()
+        opciones = {normalize(x) for x in posibles_faltantes['Producto'].dropna()}
+    opciones = sorted(n for n in opciones if n and n not in omitidos
+                      and estados.get(n, 'Activo') == 'Activo')
+    if opciones:
+        st.markdown("**Sugerencias para excluir del análisis**")
+        st.caption("Son productos detectados como posibles faltantes. Excluí solo los que no correspondan a tu análisis; no tener ventas no significa que debas excluirlos. Para completar o asociar un producto, usá Stock y cámara → Completar productos.")
+        elegidos = st.multiselect("Productos que querés excluir", opciones,
+            placeholder="Seleccioná los productos a excluir", key="sugerencias_excluir")
+        st.caption("Excluir los quita de pedidos, simulaciones, stock/cámara y costos. Un discontinuado que todavía vendés debe conservar su stock y costos; no lo excluyas por ese motivo.")
+        if st.button("EXCLUIR SELECCIONADOS", key="excluir_sugerencias", disabled=not elegidos):
+            try:
+                guardar_estados(github, maestro_path.read_bytes(), {n: 'Excluido' for n in elegidos}, anteriores)
+            except Exception as exc:
+                st.error(f"No se guardaron las exclusiones: {exc}")
+                return
+            for clave in ('pedido_descargas_labs', 'ultimo_analisis_snapshot', 'costos_mix_actual', 'informe_stock_bytes_260'):
+                st.session_state.pop(clave, None)
+            st.session_state.pop('sugerencias_excluir', None)
+            st.session_state['mensaje_omision_pedido'] = f"{len(elegidos)} producto(s) excluido(s). Podés continuar con otros; recalculá al terminar."
+            st.rerun()
+    consulta = [{'Producto': n, 'Estado': e} for n, e in sorted(estados.items())
+                if e in ('Excluido', 'Discontinuado') and n not in omitidos]
+    consulta += [{'Producto': n, 'Estado': 'Omitido de pedidos y costos'} for n in sorted(omitidos)]
+    if consulta:
+        with st.expander(f"Consultar productos excluidos y discontinuados ({len(consulta)})", expanded=False):
+            for estado, texto in [('Excluido', 'Excluidos de todos los análisis'),
+                                  ('Discontinuado', 'Discontinuados: sin compra, conservan stock y costos'),
+                                  ('Omitido de pedidos y costos', 'Omisiones anteriores: conservan stock y cámara')]:
+                filas = [r['Producto'] for r in consulta if r['Estado'] == estado]
+                if filas:
+                    st.markdown(f"**{texto} ({len(filas)})**")
+                    st.dataframe(pd.DataFrame({'Producto': filas}), hide_index=True, use_container_width=True)
+            st.caption("Solo consulta. Se conservan las decisiones guardadas; no hace falta volver a clasificarlas.")
 
 def fecha_desde_nombre_stock(nombre):
     """SmartFran: Stock_YYYYMMDD_HHMMSS.csv. Hora local de Argentina."""
@@ -1372,7 +1382,7 @@ def render_generar_pedido(github, pagina="Pedido"):
             tiempo_reposicion = st.number_input("Tiempo de reposición", min_value=0.0, max_value=8.0, value=1.0, step=0.5)
         with cfg3:
             dias_analizados = st.number_input("Días analizados", min_value=1, max_value=60, value=14, step=1)
-        st.caption("Estos parámetros se conservan al cambiar de sección. Los estados de productos se administran desde Pedido.")
+        st.caption("Estos parámetros se conservan al cambiar de sección. En Pedido podés consultar las exclusiones y revisar nuevas sugerencias.")
 
     ready = True
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1863,8 +1873,7 @@ def render_generar_pedido(github, pagina="Pedido"):
                 st.info("Cargá los tres archivos para generar tu pedido. Podés consultar Stock y cámara con el stock solamente.")
 
             if omisiones_ok:
-                with st.expander("Administrar estados de productos", expanded=True):
-                    _control_omitir_faltantes(github, st.session_state.get("omision_candidatos"), maestro_path)
+                _control_omitir_faltantes(github, st.session_state.get("omision_candidatos"), maestro_path)
 
         with tab_pallets:
             st.subheader("Optimizador de pallets")

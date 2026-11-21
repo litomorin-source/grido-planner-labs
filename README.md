@@ -1,4 +1,4 @@
-# GridoPlanner Labs 3.0.3
+# GridoPlanner Labs 3.0.4
 
 Planificación semanal, costos de reposición y stock/cámara.
 
@@ -26,21 +26,20 @@ Productos cerrados: base individual, 1; caja sin TACC x12: 12 individuales, no u
 El motor aplica una única función a stock, ventas y tránsito. La cámara también calcula el físico con el Maestro.
 Un dato conocido pero incompleto no se sustituye por Compra Mínima: se pide revisión.
 
-## Estados de productos
+## Estados y sugerencias (3.0.4)
 
-Pedido → Administrar estados de productos permite cambiar uno o varios productos y seguir con otros sin regenerar entre guardados. Recalcular al terminar.
+En Pedido solo se muestran sugerencias para excluir procedentes de los posibles faltantes del análisis. No se muestra el catálogo completo como pendiente. Se omiten de las sugerencias los excluidos, discontinuados y omisiones anteriores. No tener ventas no implica excluir automáticamente.
+Seleccionar uno o varios candidatos y pulsar EXCLUIR SELECCIONADOS los excluye de todos los análisis. Desaparecen de las sugerencias; se puede continuar con otros sin generar de nuevo entre guardados. Recalcular al terminar.
+No hay selector de Activo/Discontinuado ni editor general de estados en la interfaz.
 
-- Activo: participa normalmente.
-- Discontinuado: compra cero, conserva equivalencias, stock físico, tránsito e historial. Las ventas siguen incluidas en costos. Puede volver a Activo.
-- Excluido: fuera de pedidos, simulaciones, stock/cámara y costos. Para artículos ajenos de SmartFran o que todavía no se analizan, como velas.
+Una lista de consulta, contraída por defecto, separa:
+- Excluidos: fuera de pedidos, simulaciones, stock/cámara y costos.
+- Discontinuados: sin compra, conservan stock, tránsito, equivalencias y costos de sus ventas.
+- Omisiones anteriores aún en el CSV: conservan su efecto anterior, fuera de pedidos/costos pero presentes en stock/cámara. No se pide reclasificarlas ni se convierten silenciosamente en exclusiones generales.
 
-La decisión vive en Estado de la hoja Productos. Para nombres sin ficha de producto (artículos excluidos de SmartFran), se usa Estado en la hoja Exclusiones, sin inventar código ni equivalencias. Los nombres se resuelven por sus aliases.
-Los antiguos campos Activo/Excluir son compatibles con maestros anteriores y se sincronizan al guardar desde la interfaz; cuando existe Estado, este es la autoridad. No editar esos campos antiguos para cambiar un Estado: usar la interfaz o la columna Estado.
-No se infiere discontinuación por ausencia en el Carrito.
-
-En la primera actualización se muestran las omisiones anteriores pendientes. Cada una conserva su efecto anterior hasta clasificarla. No se presume que todas son discontinuadas ni que todas son exclusiones generales. Al completar la revisión se registra en Configuración y deja de consultarse el CSV externo, que queda como respaldo. No hay un botón separado de migración.
-Un nombre sin ficha no puede marcarse Discontinuado hasta completar sus equivalencias; sí puede Excluirse o volver a Activo para revisarlo.
-Los guardados verifican el SHA del Maestro; si otra persona lo modificó, se pide recargar para evitar pisar cambios.
+Los estados guardados en el Maestro se conservan. Las nuevas exclusiones se guardan allí, con control de SHA. El CSV anterior se lee solo cuando corresponde por compatibilidad; no se escribe. Las reactivaciones y discontinuaciones se acuerdan fuera de la app y se aplican sobre el Maestro vigente.
+La columna Estado en Productos es la autoridad. Para artículos sin ficha se usa Estado en Exclusiones, sin inventar códigos ni equivalencias. Activo/Excluir se mantienen sincronizados por compatibilidad. Ausencia en Carrito no implica discontinuación.
+Las altas y asociaciones siguen en Stock y cámara → Completar productos. No se agrega otro gestor.
 
 ## Productos nuevos
 
@@ -84,3 +83,7 @@ Las advertencias de referencias históricas de stock/cámara solo consideran pro
 La fórmula de pedido para productos activos no cambia. Se preservan las advertencias del Carrito sin aplicar mínimos, máximos ni disponibilidad a las cantidades. Pallets queda pendiente.
 
 Pruebas adicionales: `GRIDO_DATOS_PRUEBA=/carpeta PYTHONPATH=. python tests/comprobar_estados_303.py` y `python tests/comprobar_bugs_302.py` con el mismo entorno. El archivo de datos de prueba no se distribuye.
+
+## Corrección 3.0.4
+
+Se sustituye el panel de administración de 3.0.3 por sugerencias del análisis y consulta de estados. Se retira la revisión inicial obligatoria. No modifica las decisiones guardadas, las fórmulas ni los datos de la cámara. Los cambios de 3.0.3 permanecen salvo la interfaz y el requisito de reclasificar omisiones.

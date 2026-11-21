@@ -28,14 +28,13 @@ for campo in ['pedido_bytes','carrito_bytes']:
 a.session_state['omision_candidatos']=pd.DataFrame({'Producto':['prueba uno','prueba dos','prueba tres']})
 a.session_state['_permitir_guardado_prueba']=True
 a.run();check(a)
-a.multiselect(key='estados_productos').set_value(['prueba uno','prueba dos']).run()
-a.selectbox(key='estado_nuevo').set_value('Excluido').run()
-a.button(key='guardar_estados').click().run();check(a)
-assert 'prueba tres' in a.multiselect(key='estados_productos').options
+a.multiselect(key='sugerencias_excluir').set_value(['prueba uno','prueba dos']).run()
+a.button(key='excluir_sugerencias').click().run();check(a)
+assert 'prueba tres' in a.multiselect(key='sugerencias_excluir').options
 assert 'pedido_descargas_labs' not in a.session_state
-assert not a.multiselect(key='estados_productos').value
-a.multiselect(key='estados_productos').set_value(['prueba tres']).run()
-a.button(key='guardar_estados').click().run();check(a)
+assert not a.multiselect(key='sugerencias_excluir').value
+a.multiselect(key='sugerencias_excluir').set_value(['prueba tres']).run()
+a.button(key='excluir_sugerencias').click().run();check(a)
 from core.estados_productos import leer_estados
 estados,_=leer_estados(BytesIO(a.session_state['_archivos_prueba']['data/Maestro_Productos_Grido.xlsx']))
 assert estados['prueba tres']=='Excluido'
